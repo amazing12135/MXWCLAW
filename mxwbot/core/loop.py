@@ -67,6 +67,8 @@ class LoopContext:
     result: AgentRunResult | None = None
     summary: str = ""
     checkpoint_restored: bool = False
+    stop_requested: bool = False
+    msg_count_before_run: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ class Loop:
                 content="Bot 已停止当前会话。",
                 finish_reason="stop",
             )
-            await self._sessions.close(self.ctx.session)
+            self.ctx.stop_requested = True
             return "shortcut"
         elif cmd == "/status":
             msgs = self.ctx.session.message_count
@@ -270,6 +272,8 @@ class Loop:
 
     async def _handle_run(self) -> str:
         """Run the AgentRunner ReAct loop."""
+        # Record message count so SAVE knows which messages Runner added
+        self.ctx.msg_count_before_run = len(self.ctx.messages)
 
         async def _on_checkpoint(msgs: list, iteration: int) -> None:
             """Capture a snapshot before tool execution."""
@@ -288,10 +292,7 @@ class Loop:
             bus=self._bus,
             on_checkpoint=_on_checkpoint,
         )
-        # If we restored from a checkpoint with existing messages, use them
-        messages = self.ctx.messages if self.ctx.checkpoint_restored else self.ctx.messages
-
-        self.ctx.result = await self._runner.run(spec, messages)
+        self.ctx.result = await self._runner.run(spec, self.ctx.messages)
 
         if self.ctx.result.finish_reason == "error":
             return "error"
@@ -307,13 +308,24 @@ class Loop:
         self._sessions.mark_seen(self.ctx.msg)
         await self._sessions.save_inbound(self.ctx.session, self.ctx.msg)
 
-        # Append assistant response + tool results if result exists
+        # Persist intermediate assistant/tool messages added by Runner
+        for msg in self.ctx.messages[self.ctx.msg_count_before_run:]:
+            role = msg.get("role", "")
+            if role in ("assistant", "tool"):
+                await self.ctx.session.append_message(msg)
+
+        # Append final assistant response if not already included above
         result = self.ctx.result
         if result and result.content:
-            await self.ctx.session.append_message({
-                "role": "assistant",
-                "content": result.content,
-            })
+            already_saved = any(
+                m.get("role") == "assistant" and m.get("content") == result.content
+                for m in self.ctx.messages[self.ctx.msg_count_before_run:]
+            )
+            if not already_saved:
+                await self.ctx.session.append_message({
+                    "role": "assistant",
+                    "content": result.content,
+                })
 
         return "ok"
 
@@ -346,6 +358,13 @@ class Loop:
 
     async def _finish(self) -> None:
         """Cleanup after a successful turn."""
+        # Honour /stop request — close session after responding
+        if self.ctx.stop_requested:
+            try:
+                await self._sessions.close(self.ctx.session)
+            except Exception:
+                pass
+
         # Prune old checkpoints
         try:
             await self._checkpoint.prune(self.ctx.session_key)
@@ -540,7 +559,5 @@ class LoopPool:
         """Wake up a pending ``MessageBus.request_confirmation()`` call."""
         if not msg.ref_request_id:
             return
-        event = self._bus._pending.pop(msg.ref_request_id, None)
-        if event is not None:
-            self._bus._results[msg.ref_request_id] = (msg.content == "approved")
-            event.set()
+        approved = msg.content == "approved"
+        self._bus.resolve_confirmation(msg.ref_request_id, approved)
