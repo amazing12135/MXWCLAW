@@ -59,11 +59,11 @@ mxwbot/
 │   └── token_budget.py                  # Token 计数器与预算管理（含 usage_ratio）
 │
 ├── channel/                             # ═══ 多渠道接入层 ═══
-│   ├── __init__.py                      # 导出 Channel 基类 + 注册中心
-│   ├── base.py                          # BaseChannel — 频道抽象基类（含 send_stream）
-│   ├── weixin.py                        # 微信频道适配（itchat/wechaty）
-│   ├── qq.py                            # QQ 频道适配（go-cqhttp/napcat）
-│   └── email.py                         # 邮件频道适配（IMAP/SMTP）
+│   ├── __init__.py                      # 导出 BaseChannel / 异常类 / 各 Channel
+│   ├── base.py                          # BaseChannel — 模板方法模式 + 确认FIFO拦截 + TTL + ChannelError体系
+│   ├── weixin.py                        # 微信频道适配（ilink HTTP 长轮询，httpx）
+│   ├── qq.py                            # QQ 频道适配（botpy SDK WebSocket）
+│   └── email.py                         # 邮件频道适配（IMAP/SMTP，纯标准库）
 │
 ├── session/                             # ═══ 会话管理 ═══
 │   ├── __init__.py                      # 导出 SessionManager
@@ -102,7 +102,7 @@ mxwbot/
 │
 ├── utils/                               # ═══ 工具函数 ═══
 │   ├── __init__.py                      # 导出公共工具
-│   ├── security.py                      # 安全辅助（路径校验、命令注入检测）
+│   ├── security.py                      # 安全辅助（路径校验、命令注入检测、Token加密、SSRF URL校验）
 │   ├── text.py                          # 文本处理（think 标签清洗、Token 估算）
 │   ├── async_utils.py                   # 异步辅助（超时控制、并发限制）
 │   └── logging.py                       # 结构化日志（JSONL 格式）
@@ -920,74 +920,105 @@ class SubAgentManager:
 
 | 文件 | 职责 |
 |------|------|
-| `base.py` | `BaseChannel` 抽象类：`start()/stop()/send()/send_stream()/on_message()` + 确认拦截模式 |
+| `base.py` | `BaseChannel` 模板方法抽象类 + `ChannelError`/`ChannelTransientError`/`ChannelFatalError`/`ChannelAuthError` 异常体系 + FIFO 确认拦截 + TTL Task 管理 + `is_healthy()`/`is_connected()` 健康检查 |
+| `weixin.py` | `WeChatChannel` — ilink HTTP 长轮询（`ilinkai.weixin.qq.com`），token AES-GCM 加密持久化 |
+| `qq.py` | `QQChannel` — botpy SDK WebSocket，`_QQBotClient` 回调构造，SSRF/路径遍历防护 |
+| `email.py` | `EmailChannel` — IMAP 轮询 + SMTP 发送（纯标准库），SSL 主机名校验，`_imap_connection` 上下文管理器 |
 
-**BaseChannel 确认拦截模式**:
+**BaseChannel 确认拦截模式（修复后）**:
 
 ```python
 class BaseChannel(ABC):
     name: str
     bus: MessageBus
-    _pending_confirmations: dict[str, str]   # chat_id → request_id
+    _pending_confirmations: dict[str, list[str]]   # chat_id → [request_id, ...] FIFO
+    _ttl_tasks: dict[str, asyncio.Task]            # chat_id → TTL cleanup task
 
     async def send(self, msg: OutboundMessage) -> None:
         if msg.msg_type == "confirmation_request":
-            # 进入拦截模式：记录 pending，后续该 chat_id 的消息将被拦截
-            self._pending_confirmations[msg.chat_id] = msg.request_id
-            # TTL 清理：超时后自动移除，避免用户过期回复被误拦截
-            loop = asyncio.get_running_loop()
-            loop.call_later(msg.timeout_seconds or 60,
-                            lambda: self._pending_confirmations.pop(msg.chat_id, None))
-            # 渲染确认提示（按钮或 fallback 文本）
+            chat_id = msg.chat_id
+            request_id = msg.request_id
+            # FIFO: append 到列表，支持同 chat 多个待确认操作
+            self._pending_confirmations.setdefault(chat_id, []).append(request_id)
+            # TTL: cancel 旧 task → 创建新 task 并存入 _ttl_tasks
+            old_task = self._ttl_tasks.get(chat_id)
+            if old_task is not None and not old_task.done():
+                old_task.cancel()
+            self._ttl_tasks[chat_id] = self._schedule_confirmation_ttl(
+                chat_id, request_id, msg.timeout_seconds or 60,
+            )
+            # 渲染确认提示（按钮或 fallback 文本，含 request_id[:8]）
             if self.supports_interactive_buttons():
-                await self._render_buttons(msg)
+                await self._render_confirmation_buttons(msg)
             else:
-                await self._send_text(msg.chat_id, msg.fallback_prompt)
+                fallback = msg.fallback_prompt or (
+                    f"即将执行写操作 (确认码: {request_id[:8]}), "
+                    f"回复 Y 确认，N 拒绝"
+                )
+                await self._send_text(chat_id, fallback)
         else:
+            await self._on_before_send(msg)         # 富媒体钩子
             await self._send_text(msg.chat_id, msg.content)
 
-    async def on_message(self, raw_msg: dict) -> None:
-        msg = self._parse(raw_msg)
-        chat_id = msg.get("chat_id")
-        content = msg.get("content", "").strip().upper()
+    async def on_message(self, raw_msg: Any) -> None:
+        parsed = self._parse(raw_msg)
+        if parsed is None:
+            return  # 无法解析，静默丢弃
+        chat_id = parsed.get("chat_id", "")
+        content = parsed.get("content", "")
 
-        # ★ 拦截模式检测
-        if chat_id in self._pending_confirmations:
-            request_id = self._pending_confirmations.pop(chat_id)
-            approved = content in ("Y", "YES", "是", "确认", "同意")
+        # ★ FIFO 拦截模式 — 取最早的 pending request
+        if chat_id and chat_id in self._pending_confirmations:
+            pending_list = self._pending_confirmations[chat_id]
+            request_id = pending_list.pop(0)     # FIFO
+            if not pending_list:
+                del self._pending_confirmations[chat_id]
+            # Cancel 对应 TTL task
+            if chat_id in self._ttl_tasks:
+                self._ttl_tasks[chat_id].cancel()
+                del self._ttl_tasks[chat_id]
+            approved = content.strip().upper() in (
+                "Y", "YES", "是", "确认", "同意",
+            )
             await self.bus.publish_inbound(InboundMessage(
                 msg_type="confirmation_response",
-                channel=self.name,
-                chat_id=chat_id,
+                channel=self.name, chat_id=chat_id,
                 content="approved" if approved else "denied",
                 ref_request_id=request_id,
             ))
-            return  # 不投递为普通消息
+            return
 
         # 正常消息投递
+        platform_msg_id = parsed.get("platform_msg_id", "")
         await self.bus.publish_inbound(InboundMessage(
-            msg_type="message",
-            channel=self.name,
-            chat_id=chat_id,
-            content=msg.get("content"),
-            ...
+            msg_type="message", channel=self.name,
+            chat_id=chat_id, content=content,
+            idempotency_key=(
+                f"{self.name}:{chat_id}:{platform_msg_id}"
+                if platform_msg_id else ""
+            ),
         ))
 
-    @abstractmethod
-    def supports_interactive_buttons(self) -> bool: ...
+    def _schedule_confirmation_ttl(
+        self, chat_id: str, request_id: str, timeout_seconds: int,
+    ) -> asyncio.Task:
+        """超时后自动移除指定 request_id 的 pending。返回 Task 供 cancel。"""
+        async def _cleanup() -> None:
+            await asyncio.sleep(timeout_seconds)
+            if chat_id in self._pending_confirmations:
+                pending_list = self._pending_confirmations[chat_id]
+                if request_id in pending_list:
+                    pending_list.remove(request_id)
+                if not pending_list:
+                    del self._pending_confirmations[chat_id]
+            self._ttl_tasks.pop(chat_id, None)
+        return asyncio.create_task(_cleanup())
 
-    async def send_stream(self, chat_id: str) -> None:
-        """从 Bus 订阅 StreamDelta 队列，持续发送增量直到 stream_end 或 error"""
-        queue = await self.bus.subscribe_stream(self.name)
-        while True:
-            item: StreamDelta = await queue.get()
-            if item.error:
-                await self._send_chunk(chat_id, f"\n[响应中断: {item.error}]")
-                break
-            if item.delta:
-                await self._send_chunk(chat_id, item.delta)
-            if item.is_end:
-                break
+    # 异常体系（在 base.py 模块级定义）
+    # ChannelError ← ChannelTransientError / ChannelFatalError / ChannelAuthError
+
+    def is_healthy(self) -> bool: ...
+    def is_connected(self) -> bool: ...
 ```
 
 **确认拦截流程**:
@@ -1008,7 +1039,13 @@ class BaseChannel(ABC):
   → Channel 侧的 _pending_confirmations 可设置 TTL 清理
 ```
 
-**频道设计原则**: Channel 产生 `InboundMessage` → Bus → LoopPool 并发分发 → 各 Loop 处理 → 产生 `OutboundMessage` / `StreamDelta` → Bus → Channel 消费并发送
+**频道设计原则**:
+- Channel 产生 `InboundMessage` → Bus → LoopPool 并发分发 → 各 Loop 处理 → 产生 `OutboundMessage` / `StreamDelta` → Bus → Channel 消费并发送
+- 确认机制使用 FIFO 队列（`list[str]`），精确匹配 `request_id`，防止同 chat 多次确认串号
+- TTL Task 生命周期受控：创建时存入 `_ttl_tasks`，resolve/cancel/stop 时清理
+- 启动失败通过 `ChannelFatalError`/`ChannelAuthError` 向上抛，不静默
+- Token 加密存储（AES-GCM），日志中敏感字段截断脱敏
+- URL/路径访问均有白名单校验（SSRF + 路径遍历防护）
 
 ---
 
@@ -1369,7 +1406,7 @@ class DegradationEvents:
 
 | 文件 | 职责 |
 |------|------|
-| `security.py` | 路径穿越检测、命令注入模式匹配、敏感信息过滤 |
+| `security.py` | 路径穿越检测、命令注入模式匹配、敏感信息过滤、Token AES-GCM 加解密（`encrypt_token`/`decrypt_token`）、SSRF URL 校验（`validate_url`/`_is_private_host`） |
 | `text.py` | `clean_think_tags()` 清洗 `<think>` 标签、`estimate_tokens()` Token 估算、`truncate_messages()` 消息裁剪 |
 | `async_utils.py` | `timeout()` 异步超时包装器、`ConcurrencyLimiter` 并发控制 |
 | `logging.py` | 结构化日志（JSONL），支持 Level/Module/Timestamp 过滤 |
@@ -1463,6 +1500,13 @@ Layer 3: Metacognition — 结果验证 → 自我评估 → 记忆更新
 - [x] 消息去重 (`idempotency_key`)
 - [x] Checkpoint 快照原子写入（tmp + rename）
 - [x] SubAgent 禁止递归 spawn（ToolRegistry 不含 spawn tool）
+- [x] Channel Token AES-GCM 加密持久化（`encrypt_token`/`decrypt_token`）
+- [x] SSRF 防护：URL 校验白名单 + 私有 IP 段拦截
+- [x] 本地文件路径遍历防护：`resolve()` + `allowed_dirs` 前缀检查
+- [x] IMAP SSL 主机名校验 + 自签名 fallback
+- [x] 确认 FIFO 精确匹配 request_id（防串号）
+- [x] 日志敏感字段脱敏（chat_id/token 截断，`exc_info=True` 移除）
+- [x] Channel 启动失败抛明确异常（`ChannelFatalError`/`ChannelAuthError`）
 
 ---
 
@@ -1522,12 +1566,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-wechat = ["wechaty>=0.10"]
-qq = ["napcat>=1.0"]
-email = ["aioimaplib>=1.0", "aiosmtplib>=3.0"]
+wechat = ["cryptography>=41.0"]  # token AES-GCM encrypt; httpx already in core
+qq = ["qq-botpy>=1.0"]          # QQ Bot API v2 WebSocket SDK
+email = []                       # pure stdlib (imaplib / smtplib / email)
 sandbox = ["bubblewrap>=0.1"]
 ```
 
 ---
 
-> **版本**: v1.3 | **日期**: 2026-05-18 | **状态**: Phase 6 实现完成，已与实际代码对齐
+> **版本**: v1.4 | **日期**: 2026-05-20 | **状态**: Phase 7 实现 + 安全审计修复完成，已与实际代码对齐

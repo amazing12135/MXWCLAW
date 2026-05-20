@@ -191,16 +191,23 @@
 
 | # | 任务 | 文件 | 产出 | 依赖 |
 |---|------|------|------|------|
-| 7.1 | BaseChannel 抽象 | `channel/base.py` | send + send_stream + on_message + 确认拦截模式 + TTL 清理 | 3.2 |
-| 7.2 | 微信 Channel | `channel/weixin.py` | WeChat 收发（wechaty/itchat 适配） | 7.1 |
-| 7.3 | QQ Channel | `channel/qq.py` | QQ 收发（go-cqhttp/napcat 适配） | 7.1 |
-| 7.4 | Email Channel | `channel/email.py` | IMAP 轮询 + SMTP 发送 | 7.1 |
-| 7.5 | **Phase 7 测试** | `tests/test_channel/` | Mock 频道收发 + 确认拦截流程 | 7.1-7.4 |
+| 7.1 | BaseChannel 抽象 | `channel/base.py` | send + send_stream + on_message + FIFO 确认拦截 + TTL 管理 + ChannelError 异常体系 + health API | 3.2 |
+| 7.2 | 微信 Channel | `channel/weixin.py` | WeChat 收发（ilink HTTP 长轮询，httpx）+ token AES-GCM 加密持久化 | 7.1 |
+| 7.3 | QQ Channel | `channel/qq.py` | QQ 收发（botpy SDK WebSocket）+ SSRF/路径遍历防护 + `_QQBotClient` 回调 | 7.1 |
+| 7.4 | Email Channel | `channel/email.py` | IMAP 轮询 + SMTP 发送（纯标准库）+ SSL 校验 + `_imap_connection` CM | 7.1 |
+| 7.5 | **Phase 7 测试** | `tests/test_channel/` | Mock 频道收发 + 确认拦截流程 + 安全防护测试（118 tests pass） | 7.1-7.4 |
+
+**实现说明**: 微信使用 ilink HTTP 长轮询 API（`ilinkai.weixin.qq.com`），非 wechaty；QQ 使用 botpy SDK，非 napcat/go-cqhttp；Email 使用纯标准库 imaplib/smtplib/email。Phase 7 完成后进行了 14 个安全/可维护性 bug 修复（S1-S6, M1-M8）。
 
 **校验标准**:
 - 任意 Channel 收到的消息 → Bus → LoopPool → 处理后 → Channel 发送回用户
-- 确认请求 → 用户回复 Y/N → 正确拦截并转换为 confirmation_response
-- TTL 超时后用户过期回复不被误拦截
+- 确认请求 → 用户回复 Y/N → FIFO 精确匹配 request_id 并转换为 confirmation_response
+- TTL 超时后用户过期回复不被误拦截；用户及时回复后 TTL task 被 cancel
+- Token 加密持久化，account.json 不含明文 token
+- URL/路径访问经 SSRF + 路径遍历校验
+- IMAP SSL 主机名校验生效
+- 启动失败抛 `ChannelFatalError`/`ChannelAuthError` 而非静默
+- 118 个测试全部通过，零回归
 
 ---
 
@@ -276,7 +283,7 @@ Week 6 (Day 26-27): ──── Phase 9 ───██████ Phase 10 �
 | 4 | 记忆系统 | 8-10 | 三级记忆可读写检索 | ✅ 已完成 |
 | 5 | 工具系统 | 11-13 | 8 种工具全部注册可执行 | ✅ 已完成 |
 | 6 | 核心引擎 | 14-17 | ReAct 完整循环 + SubAgent | ✅ 已完成 |
-| 7 | Channel 多渠道层 | 18-20 | 微信/QQ/Email 互通 | ⬜ 待开始 |
+| 7 | Channel 多渠道层 | 18-20 | 微信/QQ/Email 互通 + 安全审计修复 | ✅ 已完成 |
 | 8 | 编排器组装 | 21-22 | 全链路跑通 | ⬜ 待开始 |
 | 9 | 基础设施服务 | 23-24 | CLI + 监控 + 心跳 | ⬜ 待开始 |
 | 10 | 测试完善与文档 | 25-27 | 覆盖率 > 80% | ⬜ 待开始 |
@@ -293,7 +300,7 @@ Week 6 (Day 26-27): ──── Phase 9 ───██████ Phase 10 �
 |--------|----------|-------------|
 | A 组 | Phase 4 记忆系统 与 Phase 5 工具系统 | Phase 3 完成后 |
 | B 组 | Phase 5.3-5.8 各工具实现 | Tool 基类完成后即可并行 |
-| C 组 | Phase 7 各 Channel 实现 | BaseChannel 完成后即可并行 |
+| C 组 | Phase 7 各 Channel 实现（WeChat ilink / QQ botpy / Email stdlib） | BaseChannel 完成后即可并行 |
 
 ---
 
@@ -302,7 +309,7 @@ Week 6 (Day 26-27): ──── Phase 9 ───██████ Phase 10 �
 | 风险 | 影响 | 应对 |
 |------|------|------|
 | Provider API 变更 | Phase 2/6 阻塞 | Provider 层专注接口抽象，具体实现可延迟适配 |
-| Channel SDK 不稳定 | Phase 7 延迟 | 优先完成 Email（最稳定），微信/QQ 可后补 |
+| Channel SDK/API 不稳定 | Phase 7 延迟 | 优先完成 Email（纯标准库最稳定），微信/QQ 可后补 |
 | Memory FTS5 性能 | Phase 4 检索慢 | 预留向量检索降级路径，先用关键词保证可用 |
 | Tool 安全漏洞 | Phase 5/10 返工 | Phase 5 每个 Tool 写完后立即做安全审计，不堆积到 Phase 10 |
 | 确认流程多轮交互导致死锁 | Phase 6/7 | Bus.request_confirmation 强制 60s 超时 + TTL 双重兜底 |
@@ -405,4 +412,4 @@ mxwbot/
 
 ---
 
-> **版本**: v1.2 | **日期**: 2026-05-18 | **配套文档**: MXWbot_DESIGN_SPEC.md v1.3
+> **版本**: v1.3 | **日期**: 2026-05-20 | **配套文档**: MXWbot_DESIGN_SPEC.md v1.4

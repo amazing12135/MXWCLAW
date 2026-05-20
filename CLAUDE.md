@@ -22,7 +22,7 @@ uv pip install -e ".[dev]"
 uv pip install <package>
 ```
 
-## Project Progress (6/10 Phases)
+## Project Progress (7/10 Phases)
 
 | Phase | Status | Key Modules |
 |-------|--------|-------------|
@@ -32,7 +32,7 @@ uv pip install <package>
 | 4 记忆 | ✅ | `memory/core.py`, `long_term_memory.py`, `summarizer.py`, `update.py` |
 | 5 工具 | ✅ | `core/tools/{base,register,filesystem,shell,sandbox,web,cron}.py` |
 | 6 引擎 | ✅ | `core/{hook,skill,context,runner,subagent}.py` |
-| 7 Channel | ⬜ | 微信/QQ/Email |
+| 7 Channel | ✅ | `channel/base.py`, `weixin.py`, `qq.py`, `email.py` |
 | 8 编排 | ⬜ | LoopPool + Loop |
 | 9 服务 | ⬜ | CLI + Watch + Heartbeat |
 | 10 测试文档 | ⬜ | 覆盖率 > 80% |
@@ -96,7 +96,7 @@ Table: `core/state.py:_TRANSITIONS`
 
 ---
 
-## Phase 7 Security & Maintainability Bug Fix Plan
+## Phase 7 Security & Maintainability Bug Fixes (✅ Implemented)
 
 > 目标：修复 Phase 7 channel 实现的安全漏洞和可维护性问题（高危+中危，不含低危和性能问题）
 
