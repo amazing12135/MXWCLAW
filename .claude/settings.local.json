@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -c \"from mxwbot.config import get_config, MXWConfig, ConfigLoader; print\\(''Config imports OK''\\); c = MXWConfig\\(\\); print\\(f''Default MXWConfig workspace: {c.workspace}''\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_providers/ -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_channel/test_qq.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_channel/test_weixin.py -v)"
+    ]
+  }
+}
