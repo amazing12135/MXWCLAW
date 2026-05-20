@@ -41,7 +41,6 @@ from mxwbot.session.manager import Session, SessionManager
 logger = logging.getLogger("mxwbot.core.loop")
 
 # Token budget for triggering COMPACT
-_MAX_CONTEXT_TOKENS = 80_000
 _COMPACT_USAGE_RATIO = 0.8
 _COMPACT_MSG_COUNT = 20
 
@@ -100,6 +99,7 @@ class Loop:
         bus: MessageBus,
         checkpoint_interval: int = 2,
         max_iterations: int = 3,
+        max_context_tokens: int = 80_000,
     ) -> None:
         self.ctx = ctx
         self._sessions = sessions
@@ -113,6 +113,7 @@ class Loop:
         self._bus = bus
         self._checkpoint_interval = checkpoint_interval
         self._max_iterations = max_iterations
+        self._max_context_tokens = max_context_tokens
 
         # -- handler table ---------------------------------------------------
         self._handlers: dict[TurnState, Callable[[], Any]] = {
@@ -226,7 +227,7 @@ class Loop:
             tokens = count_tokens(unconsolidated)
         except Exception:
             tokens = sum(len(str(m.get("content", ""))) // 4 for m in unconsolidated)
-        usage_ratio = tokens / _MAX_CONTEXT_TOKENS if _MAX_CONTEXT_TOKENS else 0
+        usage_ratio = tokens / self._max_context_tokens if self._max_context_tokens else 0
 
         if usage_ratio < _COMPACT_USAGE_RATIO:
             return "ok"
@@ -371,26 +372,17 @@ class Loop:
         except Exception:
             pass
 
-        # Consolidate memory (fact extraction)
+        # Extract long-term facts (compact was already handled in
+        # _handle_compact; pass usage_ratio=0 to skip re-compacting).
         try:
             session = self.ctx.session
-            tokens = 0
-            try:
-                tokens = count_tokens(session.messages[session.consolidated_count:])
-            except Exception:
-                pass
-            usage_ratio = tokens / _MAX_CONTEXT_TOKENS if _MAX_CONTEXT_TOKENS else 0
-            new_count, summary = await self._memory.consolidate(
+            new_count, _ = await self._memory.consolidate(
                 messages=session.messages,
                 consolidated_count=session.consolidated_count,
-                usage_ratio=usage_ratio,
-                msg_count=session.message_count,
+                usage_ratio=0.0,
+                msg_count=0,
             )
             session.consolidated_count = new_count
-            if summary:
-                session.session_summary = (
-                    (session.session_summary or "") + "\n" + summary
-                ).strip()
         except Exception:
             logger.warning(
                 "Memory consolidation failed for %s", self.ctx.session_key,
@@ -460,6 +452,7 @@ class LoopPool:
         max_concurrent: int = 20,
         checkpoint_interval: int = 2,
         max_iterations: int = 3,
+        max_context_tokens: int = 80_000,
     ) -> None:
         self._bus = bus
         self._sessions = sessions
@@ -473,6 +466,7 @@ class LoopPool:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._checkpoint_interval = checkpoint_interval
         self._max_iterations = max_iterations
+        self._max_context_tokens = max_context_tokens
         self._running = False
 
     # ------------------------------------------------------------------
@@ -499,10 +493,19 @@ class LoopPool:
     # ------------------------------------------------------------------
 
     async def _consume(self) -> None:
-        """Main consumer loop — reads from bus.input_queue forever."""
+        """Main consumer loop — reads from bus.input_queue with 1s poll.
+
+        Uses ``asyncio.wait_for`` with a 1 s timeout so that
+        ``stop()`` (which sets ``_running = False``) takes effect
+        within one second even when the queue is idle.
+        """
         while self._running:
             try:
-                msg = await self._bus.input_queue.get()
+                msg = await asyncio.wait_for(
+                    self._bus.input_queue.get(), timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                continue  # Re-check self._running
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -552,6 +555,7 @@ class LoopPool:
                     bus=self._bus,
                     checkpoint_interval=self._checkpoint_interval,
                     max_iterations=self._max_iterations,
+                    max_context_tokens=self._max_context_tokens,
                 )
                 await loop.run()
 
