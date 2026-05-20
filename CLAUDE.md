@@ -22,7 +22,7 @@ uv pip install -e ".[dev]"
 uv pip install <package>
 ```
 
-## Project Progress (7/10 Phases)
+## Project Progress (8/10 Phases)
 
 | Phase | Status | Key Modules |
 |-------|--------|-------------|
@@ -32,8 +32,8 @@ uv pip install <package>
 | 4 记忆 | ✅ | `memory/core.py`, `long_term_memory.py`, `summarizer.py`, `update.py` |
 | 5 工具 | ✅ | `core/tools/{base,register,filesystem,shell,sandbox,web,cron}.py` |
 | 6 引擎 | ✅ | `core/{hook,skill,context,runner,subagent}.py` |
-| 7 Channel | ✅ | `channel/base.py`, `weixin.py`, `qq.py`, `email.py` |
-| 8 编排 | ⬜ | LoopPool + Loop |
+| 7 Channel | ✅ | `channel/{base,weixin,qq,email}.py` |
+| 8 编排 | ✅ | `core/loop.py` (LoopPool + Loop + LoopContext) |
 | 9 服务 | ⬜ | CLI + Watch + Heartbeat |
 | 10 测试文档 | ⬜ | 覆盖率 > 80% |
 
