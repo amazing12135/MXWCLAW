@@ -428,61 +428,61 @@ class LLMCallPurpose(Enum):
 
 ### 3.3 core/ — 核心编排层
 
-#### 3.3.1 loop.py — 中央编排器（Session 隔离并发）
+#### 3.3.1 loop.py — 中央编排器（Session 隔离并发，流式输出）
 
 | 类/函数 | 职责 |
 |----------|------|
-| `LoopPool` | 全局并发管理：最多同时处理 20 个独立 Session，通过 `asyncio.Semaphore` 限流 |
-| `Loop` | 六大组件的编排者，每个 Session 独立一个 Loop 实例 |
-| `Loop.run(input_msg)` | 消息去重 → 命令分发 → 条件 Compact → 上下文构建 → Runner 执行 → 保存 |
-| `Loop._get_session_lock(key)` | 同一 `channel:chat_id` 的消息串行处理（`asyncio.Lock`），不同 Session 并行 |
-| `Loop._dispatch_command(cmd)` | 处理 `/clear` `/stop` `/status` 等斜杠命令 |
-| `Loop._preprocess_text(text)` | 输入预处理（去冗余空白、压缩重复内容） |
+| `LoopContext` | `@dataclass` 承载单 turn 上下文：`msg, session, session_key, messages, result, summary, checkpoint_restored, stop_requested, msg_count_before_run` |
+| `LoopPool` | 长驻消费者：从 `Bus.input_queue` 拉取消息，`wait_for(timeout=1s)` 轮询，`stop()` 后 ≤1 秒退出 |
+| `LoopPool._consume()` | 消息分发：`confirmation_response` → `bus.resolve_confirmation()`；`message` → `create_task(_dispatch())` |
+| `LoopPool._dispatch()` | 去重 → `Semaphore(20)` + session `asyncio.Lock` → 创建 `Loop` → `run()` |
+| `Loop` | 每消息瞬态编排器：注入 8 个 handler，持有全部基础设施引用（sessions/memory/runner/provider/tools/checkpoint/skills/bus） |
+| `Loop.run()` | `StateManager` 驱动循环 → 8 状态 pipeline → `_finish()` 收尾 |
+| `Loop._handlers` | `dict[TurnState, Callable]` — handler 返回 event 字符串，转移表决定跳转 |
 
-**LoopPool 消费循环**（Bus 不做分发，LoopPool 拥有消费循环）:
-```python
-class LoopPool:
-    _semaphore: asyncio.Semaphore(20)
-    _session_locks: dict[str, asyncio.Lock]
-
-    async def start(self):
-        """从 Bus 持续消费消息，按 msg_type 分发"""
-        while True:
-            msg = await self._bus.input_queue.get()
-            if msg.msg_type == "confirmation_response":
-                # 确认响应 → 唤醒挂起的 request_confirmation
-                event = self._bus._pending.pop(msg.ref_request_id, None)
-                if event:
-                    self._bus._results[msg.ref_request_id] = (msg.content == "approved")
-                    event.set()
-            else:
-                asyncio.create_task(self._dispatch(msg))
-
-    async def _dispatch(self, msg):
-        async with self._semaphore:
-            session_key = f"{msg.channel}:{msg.chat_id}"
-            async with self._get_lock(session_key):
-                loop = Loop(session_key, ...)
-                await loop.run(msg)
-```
-
-**核心流程**:
+**核心流程（实现后）**:
 ```
 1. 去重检测 → is_duplicate()? → 是则丢弃
-2. 系统消息检测 → 特殊路径（有限历史）
-3. 获取/创建 Session（按 channel:chat_id）
-4. State → COMMAND（首先执行命令检测）
-5. 斜杠命令分发（/clear、/stop、/status 等）→ 命令直接处理并结束
-6. State → RESTORE → 检查是否有未恢复 Checkpoint → 有则恢复
-7. TokenBudget.usage_ratio > 0.8 且 msg_count > 20 → COMPACT → 压缩历史
-   否则跳过 COMPACT，直接 BUILD
-8. State → BUILD → ContextBuilder.build(purpose=AGENT)
-9. State → RUN → AgentRunner.run()
-10. State → SAVE → SessionManager.save()
-11. State → RESPOND → 发送 OutboundMessage
-12. CheckpointManager.prune() 清理本次快照
-13. MemoryManager.consolidate(purpose=SUMMARY) 后台记忆合并
-14. State → DONE
+2. 获取/创建 Session（按 channel:chat_id）
+3. State → COMMAND（/clear /stop /status 短路）
+4. State → RESTORE → load_latest checkpoint → 有则恢复 messages
+5. 条件 COMPACT: msg_count > 20 AND usage_ratio > 0.8 → summarise
+6. State → BUILD → ContextBuilder.build(purpose=AGENT)
+7. State → RUN → AgentRunner.run_stream() [流式 delta → BusStreamHook → bus]
+8. State → SAVE → mark_seen + save_inbound + 持久化 Runner 新增 assistant/tool 消息
+9. State → RESPOND → StreamDelta(is_end=True) 关流 + OutboundMessage fallback
+10. _finish(): /stop 延迟 close → prune checkpoints → fact extraction (usage_ratio=0)
+```
+
+**并发模型**:
+```python
+class LoopPool:
+    async def _consume(self):
+        while self._running:
+            msg = await asyncio.wait_for(bus.input_queue.get(), timeout=1.0)
+            if msg.msg_type == "confirmation_response":
+                self._bus.resolve_confirmation(msg.ref_request_id, msg.content == "approved")
+            else:
+                asyncio.create_task(self._dispatch(msg))  # 不阻塞消费循环
+
+    async def _dispatch(self, msg):
+        if sessions.is_duplicate(msg):  return
+        session = await sessions.get_session(msg.channel, msg.chat_id)
+        async with self._semaphore:                    # 全局 ≤20
+            async with sessions.get_lock(...):          # 同 session 串行
+                loop = Loop(LoopContext(...), ...)
+                await loop.run()
+```
+
+**流式输出路径**:
+```
+AgentRunner.run_stream()
+  → provider.chat_stream()
+    → delta "我来" → BusStreamHook.on_stream_delta()
+      → bus.publish_stream_delta(StreamDelta(channel, chat_id, delta))
+        → Channel.send_stream() 实时逐字发送
+  → 工具调用 delta 静默累积 → 完整 ToolCallRequest → 工具执行
+  → 最终: bus.publish_stream_delta(is_end=True) 关流
 ```
 
 #### 3.3.2 state.py — 事件驱动状态机
@@ -592,7 +592,7 @@ Handler 只描述结果，不关心跳到哪。转发表拥有全部路由决策
 | `AgentRunner` | 纯引擎：LLM 调用 → 工具执行 → 结果注入 → 再调用的 ReAct 循环 |
 | `AgentRunResult` | 执行结果：content、tool_calls_made（累计）、iterations、usage、finish_reason |
 
-**AgentRunner 核心循环（非流式 + 批量确认 + 工具调用前后 Checkpoint）**:
+**AgentRunner 核心循环（流式 `run_stream()` + 批量确认 + 工具调用前后 Checkpoint）**:
 ```python
 class AgentRunner:
     async def run(self, spec: AgentRunSpec, messages: list[dict]) -> AgentRunResult:
@@ -675,8 +675,9 @@ class AgentRunner:
 | `"max_iterations"` | 达到最大迭代次数 |
 
 **与设计计划的差异**:
-- 第一阶段使用非流式 `chat()`（非 `chat_stream()`），非流式实现更简单、更易调试
-- 流式模式可通过 `StreamProcessHook` 添加，Runner 已预留 `on_stream_delta` Hook 回调点
+- Phase 8 已实现流式：`run_stream()` 使用 `chat_stream()` 替代 `chat()`，`BusStreamHook` 将 delta → `bus.publish_stream_delta()`
+- `_stream_one()` 累积文本 + 工具调用 deltas → 完整 `LLMResponse`，工具执行逻辑与 `run()` 一致
+- 非流式 `run()` 保留供测试和兼容
 - 确认弹窗的 `channel`/`chat_id` 当前为空字符串（由 Loop 层注入真实值）
 
 #### 3.3.5 hook.py — 钩子系统
@@ -1531,14 +1532,14 @@ CLI (cli/main.py)
 消息到达:
   Channel.on_message → Bus.publish_inbound(InboundMessage)
     → LoopPool.start() 消费循环获取
-      → msg_type == "confirmation_response" → 唤醒等待的 request_confirmation
+      → msg_type == "confirmation_response" → bus.resolve_confirmation()
       → msg_type == "message" → SessionManager.is_duplicate()? 是 → 丢弃
         → LoopPool._dispatch(session_key, msg)
           → [并发控制] Semaphore + session Lock
-          → Loop.run(msg) → [状态机 COMMAND → ... → DONE]
-          → [流式] Bus.publish_stream_delta → Channel.send_stream()
-          → [中断] StreamDelta(error=...) → Channel 展示中断
-          → [完整] Bus.publish_outbound → Channel.send()
+          → Loop.run(ctx) → [状态机 COMMAND → ... → DONE]
+          → [流式] AgentRunner.run_stream() → BusStreamHook → bus.publish_stream_delta()
+          → [关流] bus.publish_stream_delta(is_end=True)
+          → [fallback] bus.publish_outbound(OutboundMessage) → Channel.send()
 ```
 
 ---
@@ -1574,4 +1575,4 @@ sandbox = ["bubblewrap>=0.1"]
 
 ---
 
-> **版本**: v1.4 | **日期**: 2026-05-20 | **状态**: Phase 7 实现 + 安全审计修复完成，已与实际代码对齐
+> **版本**: v1.5 | **日期**: 2026-05-21 | **状态**: Phase 8 实现 + 流式支持完成，已与实际代码对齐

@@ -213,18 +213,23 @@
 
 ### Phase 8: 编排器组装（第 21-22 天）
 
-**目标**: LoopPool 消费循环启动，全链路跑通
+**目标**: LoopPool 消费循环启动，全链路跑通，支持流式输出
 
 | # | 任务 | 文件 | 产出 | 依赖 |
 |---|------|------|------|------|
-| 8.1 | Loop 编排器 | `core/loop.py` | Loop（6 组件编排 + 状态机驱动 + 消息预处理 + 命令分发） | 6.4, 6.6, 6.7, 4.7, 3.3, 3.1 |
-| 8.2 | LoopPool 并发管理 | `core/loop.py` | LoopPool（Semaphore(20) + session locks + 消费循环 + confirmation_response 分发） | 8.1, 3.2 |
-| 8.3 | **Phase 8 集成测试** | 端到端测试 | 全链路：消息入站 → 去重 → 编排 → 流式 → 回复 | 8.1-8.2 |
+| 8.1 | Loop 编排器 | `core/loop.py` | LoopContext + Loop (8状态 handler 表) + 命令短路 + COMPACT 守卫 | 6.4, 6.6, 4.7, 3.3, 3.1 |
+| 8.2 | LoopPool 并发管理 | `core/loop.py` | LoopPool (Semaphore(20) + session locks + wait_for 消费循环 + resolve_confirmation 公共 API) | 8.1, 3.2 |
+| 8.3 | 流式输出 | `core/runner.py`, `core/loop.py` | AgentRunner.run_stream() + _stream_one + BusStreamHook → bus.publish_stream_delta | 8.1, 6.1 |
+| 8.4 | **Phase 8 集成测试** | `tests/test_core/test_loop.py` | 19 tests: 8 handler + 全周期 + LoopPool + 状态转移 | 8.1-8.3 |
+
+**实现说明**: 方案 A (Orchestrator + StateMachine)。Loop 每消息瞬态创建，StateManager 驱动 8 状态。流式通过 `AgentRunner.run_stream()` → `chat_stream()` → `BusStreamHook` → `bus.publish_stream_delta()` 实时推送。`_handle_respond` 发送 `StreamDelta(is_end=True)` 关流 + `OutboundMessage` fallback。
 
 **校验标准**:
 - 单用户连续 3 条消息，顺序处理不越序
 - 2 个不同 chat_id 并发消息，同时处理互不阻塞
 - 同一 Session 并发消息串行化
+- 流式 delta 实时推送到 Bus，终端 delta 正确关流
+- 19 tests passed, 433 全量零回归
 
 ---
 
@@ -284,7 +289,7 @@ Week 6 (Day 26-27): ──── Phase 9 ───██████ Phase 10 �
 | 5 | 工具系统 | 11-13 | 8 种工具全部注册可执行 | ✅ 已完成 |
 | 6 | 核心引擎 | 14-17 | ReAct 完整循环 + SubAgent | ✅ 已完成 |
 | 7 | Channel 多渠道层 | 18-20 | 微信/QQ/Email 互通 + 安全审计修复 | ✅ 已完成 |
-| 8 | 编排器组装 | 21-22 | 全链路跑通 | ⬜ 待开始 |
+| 8 | 编排器组装 | 21-22 | 全链路跑通 + 流式输出 | ✅ 已完成 |
 | 9 | 基础设施服务 | 23-24 | CLI + 监控 + 心跳 | ⬜ 待开始 |
 | 10 | 测试完善与文档 | 25-27 | 覆盖率 > 80% | ⬜ 待开始 |
 
@@ -412,4 +417,4 @@ mxwbot/
 
 ---
 
-> **版本**: v1.3 | **日期**: 2026-05-20 | **配套文档**: MXWbot_DESIGN_SPEC.md v1.4
+> **版本**: v1.4 | **日期**: 2026-05-21 | **配套文档**: MXWbot_DESIGN_SPEC.md v1.5

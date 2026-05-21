@@ -42,19 +42,33 @@ uv pip install <package>
 ### Data Flow (per turn)
 ```
 Channel → Bus.publish_inbound(InboundMessage)
-  → LoopPool._dispatch()
-    → Loop.run(msg)
-      → StateManager: COMMAND→RESTORE→COMPACT→BUILD→RUN→SAVE→RESPOND→DONE
-      → ContextBuilder.build(purpose, session, user_msg, memory, skills)
-      → AgentRunner.run(spec, messages)  [LLM ↔ Tool calls loop]
-      → SessionManager.save_inbound()
-      → MemoryManager.consolidate()
-    → Bus.publish_outbound(OutboundMessage) → Channel.send()
+  → LoopPool._consume()
+    ├── confirmation_response → bus.resolve_confirmation()
+    └── message → asyncio.create_task(_dispatch())
+      → [Semaphore(20) + session Lock]
+      → Loop.run(ctx)
+        → StateManager: COMMAND→RESTORE→COMPACT→BUILD→RUN→SAVE→RESPOND→DONE
+        → ContextBuilder.build(purpose, session, user_msg, memory, skills)
+        → AgentRunner.run_stream(spec, messages)  [LLM ↔ Tool calls, 流式→Bus]
+        → SessionManager.save_inbound()
+        → MemoryManager.consolidate()
+        → Bus.publish_stream_delta(is_end=True)  ← 关闭流
+      → Bus.publish_outbound(OutboundMessage) → Channel.send()
 ```
 
 ### State Machine (event-driven)
 Handlers return event strings (`"ok"`, `"error"`, `"shortcut"`, `"dispatch"`). A transition table maps `(state, event)` → `next_state`. Handlers never call `transition()` directly.
 Table: `core/state.py:_TRANSITIONS`
+
+### Loop Orchestrator
+- `LoopPool`: 长驻消费者, Semaphore(20) 并发, per-session `asyncio.Lock` 串行, `stop()` 1s 内退出
+- `Loop`: 每消息瞬态编排器, 注入 8 个 handler, `LoopContext` dataclass 传递状态
+- `LoopContext`: `msg, session, session_key, messages, result, summary, checkpoint_restored, stop_requested, msg_count_before_run`
+- `/clear /stop /status` 命令短路: COMMAND→shortcut→SAVE, 跳过 RESTORE...RUN
+- Runner 错误: RUN→error→RESTORE 回退, emergency checkpoint 保存
+- 流式: `AgentRunner.run_stream()` → `BusStreamHook` → `bus.publish_stream_delta()` → `Channel.send_stream()`
+- RESPOND: 发送 `StreamDelta(is_end=True)` 关闭流 + `OutboundMessage` fallback
+- `_finish`: /stop close session → prune checkpoint → fact extraction (无重复 compact)
 
 ### Session
 - Short-term: `Session.messages` (JSONL file per `channel:chat_id`)
