@@ -72,6 +72,13 @@ class _FakeRunner(AgentRunner):
     async def run(self, spec, messages):
         return self._result
 
+    async def run_stream(self, spec, messages):
+        # Publish any pre-loaded content as stream deltas
+        if self._result.content and spec.hook:
+            for word in self._result.content.split():
+                await spec.hook.on_stream_delta(word + " ")
+        return self._result
+
 
 def _make_inbound(
     channel="test", chat_id="u1",

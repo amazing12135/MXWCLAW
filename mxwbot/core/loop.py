@@ -21,10 +21,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from mxwbot.bus.messages import InboundMessage, OutboundMessage
+from mxwbot.bus.messages import InboundMessage, OutboundMessage, StreamDelta
 from mxwbot.bus.queue import MessageBus
 from mxwbot.checkpoint.manager import CheckpointManager, CheckpointSnapshot
 from mxwbot.core.context import ContextBuilder
+from mxwbot.core.hook import AgentHook
 from mxwbot.core.runner import AgentRunner, AgentRunSpec, AgentRunResult
 from mxwbot.core.skill import SkillLoader
 from mxwbot.core.state import (
@@ -272,9 +273,38 @@ class Loop:
     # ------------------------------------------------------------------
 
     async def _handle_run(self) -> str:
-        """Run the AgentRunner ReAct loop."""
+        """Run the AgentRunner ReAct loop with streaming."""
         # Record message count so SAVE knows which messages Runner added
         self.ctx.msg_count_before_run = len(self.ctx.messages)
+
+        # -- stream hook: publish text deltas to Bus in real time -----------
+        channel = self.ctx.msg.channel
+        chat_id = self.ctx.msg.chat_id
+
+        class _BusStreamHook(AgentHook):
+            """Forwards text deltas to Bus stream queue in real time."""
+            def __init__(self, bus: Any, channel: str, chat_id: str) -> None:
+                self._bus = bus
+                self._channel = channel
+                self._chat_id = chat_id
+                self._seq = 0
+
+            async def on_stream_delta(self, delta: str) -> None:
+                self._seq += 1
+                await self._bus.publish_stream_delta(StreamDelta(
+                    stream_id=f"{self._channel}:{self._chat_id}",
+                    channel=self._channel, chat_id=self._chat_id,
+                    delta=delta, seq=self._seq,
+                ))
+
+        stream_hook = _BusStreamHook(self._bus, channel, chat_id)
+
+        # Signal stream start
+        await self._bus.publish_stream_delta(StreamDelta(
+            stream_id=f"{channel}:{chat_id}",
+            channel=channel, chat_id=chat_id,
+            delta="", seq=0,
+        ))
 
         async def _on_checkpoint(msgs: list, iteration: int) -> None:
             """Capture a snapshot before tool execution."""
@@ -291,9 +321,10 @@ class Loop:
             max_iterations=self._max_iterations,
             checkpoint_interval=self._checkpoint_interval,
             bus=self._bus,
+            hook=stream_hook,
             on_checkpoint=_on_checkpoint,
         )
-        self.ctx.result = await self._runner.run(spec, self.ctx.messages)
+        self.ctx.result = await self._runner.run_stream(spec, self.ctx.messages)
 
         if self.ctx.result.finish_reason == "error":
             return "error"
@@ -335,15 +366,28 @@ class Loop:
     # ------------------------------------------------------------------
 
     async def _handle_respond(self) -> str:
-        """Deliver the final reply to the channel via MessageBus."""
+        """Deliver the final reply to the channel via MessageBus.
+
+        Closes the stream with a terminal ``StreamDelta(is_end=True)``
+        then publishes the full ``OutboundMessage`` as a fallback for
+        channels that don't support streaming.
+        """
         result = self.ctx.result
         if result is None:
             return "ok"
 
-        content = result.content or ""
         channel = self.ctx.msg.channel
         chat_id = self.ctx.msg.chat_id
+        content = result.content or ""
 
+        # Close the stream — channel.send_stream() uses this as terminal
+        await self._bus.publish_stream_delta(StreamDelta(
+            stream_id=f"{channel}:{chat_id}",
+            channel=channel, chat_id=chat_id,
+            delta="", seq=-1, is_end=True,
+        ))
+
+        # Fallback: full message for non-streaming consumers
         await self._bus.publish_outbound(OutboundMessage(
             channel=channel,
             chat_id=chat_id,
