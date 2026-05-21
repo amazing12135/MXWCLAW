@@ -22,7 +22,7 @@ uv pip install -e ".[dev]"
 uv pip install <package>
 ```
 
-## Project Progress (8/10 Phases)
+## Project Progress (9/10 Phases)
 
 | Phase | Status | Key Modules |
 |-------|--------|-------------|
@@ -34,7 +34,7 @@ uv pip install <package>
 | 6 引擎 | ✅ | `core/{hook,skill,context,runner,subagent}.py` |
 | 7 Channel | ✅ | `channel/{base,weixin,qq,email}.py` |
 | 8 编排 | ✅ | `core/loop.py` (LoopPool + Loop + LoopContext) |
-| 9 服务 | ⬜ | CLI + Watch + Heartbeat |
+| 9 服务 | ✅ | `system/`, `cron/`, `heartbeat/`, `watch/`, `cli/` |
 | 10 测试文档 | ⬜ | 覆盖率 > 80% |
 
 ## Architecture Overview
@@ -69,6 +69,13 @@ Table: `core/state.py:_TRANSITIONS`
 - 流式: `AgentRunner.run_stream()` → `BusStreamHook` → `bus.publish_stream_delta()` → `Channel.send_stream()`
 - RESPOND: 发送 `StreamDelta(is_end=True)` 关闭流 + `OutboundMessage` fallback
 - `_finish`: /stop close session → prune checkpoint → fact extraction (无重复 compact)
+
+### Heartbeat + Cron (Phase 9)
+- `HeartbeatService`: LLM 驱动, 周期性读 workspace/HEARTBEAT.md, 通过 heartbeat tool 让 LLM 决策 skip/run
+- `CronService`: at/every/cron 三种调度, JSON 持久化到 `cron/jobs.json`, timer sleep 到点触发
+- `CronTool` (LLM 调用) 直接写 `cron/jobs.json`, CronService 检测 mtime 变化自动 reload
+- `SystemManager`: 全局组件注册中心 + 拓扑排序启动, `ManagementAPI` 监听 127.0.0.1:9090
+- CLI: Typer 子命令 (serve/channel/heartbeat/cron/watch/config/skill), 通过 HTTP 与 serve 通信
 
 ### Session
 - Short-term: `Session.messages` (JSONL file per `channel:chat_id`)
