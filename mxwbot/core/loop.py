@@ -166,6 +166,8 @@ class Loop:
             return "dispatch"  # Normal message flow
 
         cmd = content.lower().split()[0]
+        if cmd == "/admin":
+            return self._handle_admin(content)
         if cmd == "/clear":
             self.ctx.session.clear()
             self.ctx.result = AgentRunResult(
@@ -191,6 +193,35 @@ class Loop:
         else:
             # Unknown command — treat as normal message
             return "dispatch"
+
+    def _handle_admin(self, content: str) -> str:
+        """Handle /admin system commands inline (no LLM call)."""
+        parts = content.strip().split()[1:]
+        if not parts:
+            return "dispatch"
+
+        sub = parts[0].lower()
+        if sub == "status":
+            # Loop-local stats
+            sessions = getattr(self._sessions, "_sessions", {})
+            total = len(sessions)
+            self.ctx.result = AgentRunResult(
+                content=f"Session: {self.ctx.session_key}\n"
+                        f"Active sessions: {total}\n"
+                        f"Messages in this session: {self.ctx.session.message_count}\n"
+                        f"Consolidated: {self.ctx.session.consolidated_count}",
+                finish_reason="stop",
+            )
+            return "shortcut"
+
+        if sub == "cron" and len(parts) >= 2:
+            self.ctx.result = AgentRunResult(
+                content=f"Use 'mxwbot cron {parts[1]}' via CLI for cron management.",
+                finish_reason="stop",
+            )
+            return "shortcut"
+
+        return "dispatch"
 
     # ------------------------------------------------------------------
     # RESTORE: load pending checkpoint
