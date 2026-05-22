@@ -435,16 +435,15 @@ class TestTokenEncryption:
 class TestWeixinStartErrors:
     @pytest.mark.asyncio
     async def test_start_raises_on_missing_token(self, tmp_path):
-        """token 未配置且无 account.json → 抛 ChannelFatalError。"""
+        """token 未配置且无 account.json → 尝试 QR 登录失败，抛 ChannelAuthError。"""
         ch = _make_channel(token="", state_dir=str(tmp_path))
         ch._running = True
-        with pytest.raises(ChannelFatalError, match="token not configured"):
+        with pytest.raises(ChannelAuthError, match="QR login failed"):
             await ch._start()
 
     @pytest.mark.asyncio
     async def test_start_raises_on_empty_token(self, tmp_path):
-        """token 为空字符串且 account.json 存在 → 抛 ChannelAuthError。"""
-        # account.json 存在但 token_encrypted 无效 → 解密后为空
+        """token 为空且 account.json 无效 → 尝试 QR 登录失败，抛 ChannelAuthError。"""
         account = tmp_path / "account.json"
         account.write_text(json.dumps({
             "token_encrypted": "!!!invalid-base64!!!",
@@ -452,5 +451,5 @@ class TestWeixinStartErrors:
         }))
         ch = _make_channel(token="", state_dir=str(tmp_path))
         ch._running = True
-        with pytest.raises(ChannelAuthError, match="token is empty"):
+        with pytest.raises(ChannelAuthError, match="QR login failed"):
             await ch._start()
