@@ -117,6 +117,7 @@ class LLMStreamChunk:
     tool_call_delta: ToolCallDelta | None = None
     finish_reason: str | None = None
     error: str | None = None  # Non-null when the stream terminated with an error
+    reasoning_content: str | None = None  # DeepSeek-R1 thinking mode
 
 
 class LLMCallPurpose(Enum):

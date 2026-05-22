@@ -204,6 +204,7 @@ class OpenAIProvider(LLMProvider):
             tool_calls=tool_calls,
             usage=usage,
             finish_reason=choice.finish_reason or "stop",
+            reasoning_content=getattr(msg, "reasoning_content", None) or None,
         )
 
     @staticmethod
@@ -235,6 +236,12 @@ class OpenAIProvider(LLMProvider):
                         )
                     )
                 )
+
+        # Reasoning content (DeepSeek-R1 / Kimi thinking mode)
+        if delta and getattr(delta, "reasoning_content", None):
+            chunks.append(LLMStreamChunk(
+                reasoning_content=delta.reasoning_content,
+            ))
 
         # Finish reason (terminal chunk)
         if choice.finish_reason:

@@ -155,7 +155,7 @@ class AgentRunner:
             results = await spec.tools.execute_batch(tool_call_dicts)
 
             # 注入结果到消息列表
-            messages.append({
+            asst_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": response.content,
                 "tool_calls": [
@@ -166,7 +166,10 @@ class AgentRunner:
                     }
                     for tc in tool_calls
                 ],
-            })
+            }
+            if response.reasoning_content:
+                asst_msg["reasoning_content"] = response.reasoning_content
+            messages.append(asst_msg)
             for cid, result in results:
                 # Find the tool name for this call
                 tool_name = next(
@@ -301,7 +304,7 @@ class AgentRunner:
             results = await spec.tools.execute_batch(tool_call_dicts)
 
             # 注入结果到消息列表
-            messages.append({
+            asst_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": response.content,
                 "tool_calls": [
@@ -312,7 +315,10 @@ class AgentRunner:
                     }
                     for tc in tool_calls
                 ],
-            })
+            }
+            if response.reasoning_content:
+                asst_msg["reasoning_content"] = response.reasoning_content
+            messages.append(asst_msg)
             for cid, result in results:
                 tool_name = next(
                     (tc.name for tc in tool_calls if tc.id == cid), "unknown"
@@ -365,6 +371,7 @@ class AgentRunner:
         pending_calls: dict[int, dict[str, Any]] = {}  # index → {id, name, args}
         finish_reason = "stop"
         usage = TokenUsage()
+        reasoning_content: str | None = None
 
         async for chunk in provider.chat_stream(messages, tools_schema):
             if chunk.error:
@@ -378,6 +385,9 @@ class AgentRunner:
                 content_parts.append(chunk.delta)
                 if hook:
                     await hook.on_stream_delta(chunk.delta)
+
+            if chunk.reasoning_content:
+                reasoning_content = chunk.reasoning_content
 
             if chunk.tool_call_delta:
                 d = chunk.tool_call_delta
@@ -409,4 +419,5 @@ class AgentRunner:
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+            reasoning_content=reasoning_content,
         )
