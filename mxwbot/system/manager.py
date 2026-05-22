@@ -246,6 +246,7 @@ class SystemManager:
             max_iterations=self._max_iterations,
             max_context_tokens=self._max_context_tokens,
             stream_on_token=on_stream,
+            skip_confirmation=True,
         )
         await loop.run()
 

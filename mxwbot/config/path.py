@@ -66,7 +66,9 @@ def get_tmp_dir(workspace: Path) -> Path:
 
 def _sanitize(name: str) -> str:
     """Replace characters unsafe for a filename component."""
-    return name.replace("/", "_").replace("\\", "_").replace("..", "_")
+    for ch in ("/", "\\", "..", ":", "<", ">", '"', "|", "?", "*"):
+        name = name.replace(ch, "_")
+    return name
 
 
 def get_session_path(workspace: Path, channel: str, chat_id: str) -> Path:

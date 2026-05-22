@@ -102,6 +102,7 @@ class Loop:
         max_iterations: int = 3,
         max_context_tokens: int = 80_000,
         stream_on_token: Any = None,
+        skip_confirmation: bool = False,
     ) -> None:
         self.ctx = ctx
         self._sessions = sessions
@@ -117,6 +118,7 @@ class Loop:
         self._max_iterations = max_iterations
         self._max_context_tokens = max_context_tokens
         self._stream_on_token = stream_on_token
+        self._skip_confirmation = skip_confirmation
 
         # -- handler table ---------------------------------------------------
         self._handlers: dict[TurnState, Callable[[], Any]] = {
@@ -367,7 +369,7 @@ class Loop:
             tools=self._tools,
             max_iterations=self._max_iterations,
             checkpoint_interval=self._checkpoint_interval,
-            bus=self._bus,
+            bus=None if self._skip_confirmation else self._bus,
             hook=stream_hook,
             on_checkpoint=_on_checkpoint,
         )
