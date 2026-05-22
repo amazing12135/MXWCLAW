@@ -35,6 +35,9 @@ dev = [
     "pytest-mock>=3.12",
 ]
 
+[project.scripts]
+mxwbot = "mxwbot.cli.main:app"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
