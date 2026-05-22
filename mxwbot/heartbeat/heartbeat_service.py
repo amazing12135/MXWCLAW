@@ -4,6 +4,15 @@ Reads ``HEARTBEAT.md`` from the workspace, asks the LLM (via a
 virtual ``heartbeat`` tool call) whether there are active tasks.
 If the decision is ``run``, calls ``on_execute`` to publish the
 task to the Bus for normal Loop processing.
+
+设计亮点
+
+1. 两阶段流水线：
+    - Phase 1（决策）：轻量级 LLM 调用，只看 HEARTBEAT.md + 一个 tool call
+    - Phase 2（执行）：仅在 Phase 1 返回 run 时才触发重型 agent 循环
+2. 结构化输出强制：通过 function calling 的 enum: ["skip", "run"] 约束 LLM 输出，杜绝了解析自由文本的歧义
+3. 通知门控：evaluate_response 作为第二道关卡——任务执行完了不等于必须通知用户
+4. 优雅关闭：stop() 取消 _task，_run_loop 捕获 CancelledError 干净退出
 """
 
 from __future__ import annotations
@@ -103,7 +112,7 @@ class HeartbeatService:
             return
 
         self._running = True
-        self._task = asyncio.create_task(self._run_loop())
+        self._task = asyncio.create_task(self._run_loop())#创建了异步任务来执行心跳循环，这样它就可以在后台运行，不会阻塞主线程
         logger.info("Heartbeat: started (every %ss)", self._interval_s)
 
     def stop(self) -> None:

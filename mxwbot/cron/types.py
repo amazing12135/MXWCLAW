@@ -2,6 +2,14 @@
 
 Mirrors the nanobot cron types but adapted for mxwbot's dataclass
 convention and JSON-file persistence model.
+
+- CronSchedule: defines when the job should run (at/every/cron)
+- CronPayload: defines what the job does (currently only "agent_turn")
+- CronRunRecord: records the outcome of each run (timestamp, status, error)
+- CronJobState: tracks runtime state (next run time, last status, history)
+- CronJob: the main job definition (id, name, schedule, payload, state)
+- CronStore: the top-level structure for storing all jobs in a JSON file
+
 """
 
 from __future__ import annotations
