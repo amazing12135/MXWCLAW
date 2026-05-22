@@ -101,6 +101,7 @@ class Loop:
         checkpoint_interval: int = 2,
         max_iterations: int = 3,
         max_context_tokens: int = 80_000,
+        stream_on_token: Any = None,
     ) -> None:
         self.ctx = ctx
         self._sessions = sessions
@@ -115,6 +116,7 @@ class Loop:
         self._checkpoint_interval = checkpoint_interval
         self._max_iterations = max_iterations
         self._max_context_tokens = max_context_tokens
+        self._stream_on_token = stream_on_token
 
         # -- handler table ---------------------------------------------------
         self._handlers: dict[TurnState, Callable[[], Any]] = {
@@ -313,22 +315,36 @@ class Loop:
         chat_id = self.ctx.msg.chat_id
 
         class _BusStreamHook(AgentHook):
-            """Forwards text deltas to Bus stream queue in real time."""
-            def __init__(self, bus: Any, channel: str, chat_id: str) -> None:
+            """Forwards text deltas to Bus + optional terminal callback."""
+            def __init__(
+                self, bus: Any, channel: str, chat_id: str,
+                *, on_stream: Any = None,
+            ) -> None:
                 self._bus = bus
                 self._channel = channel
                 self._chat_id = chat_id
                 self._seq = 0
+                self._on_stream = on_stream
 
             async def on_stream_delta(self, delta: str) -> None:
                 self._seq += 1
+                # 1. Always publish to Bus (serve mode)
                 await self._bus.publish_stream_delta(StreamDelta(
                     stream_id=f"{self._channel}:{self._chat_id}",
                     channel=self._channel, chat_id=self._chat_id,
                     delta=delta, seq=self._seq,
                 ))
+                # 2. Optional terminal callback (agent mode)
+                if self._on_stream:
+                    try:
+                        await self._on_stream(delta)
+                    except Exception:
+                        pass  # terminal output failure must not break the agent
 
-        stream_hook = _BusStreamHook(self._bus, channel, chat_id)
+        stream_hook = _BusStreamHook(
+            self._bus, channel, chat_id,
+            on_stream=self._stream_on_token,
+        )
 
         # Signal stream start
         await self._bus.publish_stream_delta(StreamDelta(

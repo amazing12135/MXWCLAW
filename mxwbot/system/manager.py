@@ -172,6 +172,10 @@ class SystemManager:
         self._register(Component("heartbeat", ComponentState.STOPPED, self.heartbeat,
             depends_on=["loop_pool"]))
 
+        # Agent defaults (used by process_direct)
+        self._max_iterations = getattr(self.config.agent, "max_iterations", 3)
+        self._max_context_tokens = 80_000  # TODO: derive from provider context window
+
     async def serve(self) -> None:
         """Start all registered components."""
         self._running = True
@@ -182,6 +186,79 @@ class SystemManager:
 
         logger.info("All components started — consuming messages")
         await self.loop_pool.start()
+
+    # ------------------------------------------------------------------
+    # process_direct — synchronous agent call
+    # ------------------------------------------------------------------
+
+    async def process_direct(
+        self,
+        content: str,
+        session_key: str,
+        *,
+        channel: str = "cli",
+        chat_id: str = "direct",
+        on_stream: Any = None,
+        keep_recent: int = 0,
+    ) -> Any:  # AgentRunResult
+        """Send a message directly to the agent and wait for the result.
+
+        Unlike serve mode (which uses LoopPool's async consumer), this
+        method creates a Loop inline and runs the full 8-state pipeline
+        synchronously from the caller's perspective.  The caller receives
+        the ``AgentRunResult`` directly.
+
+        Args:
+            content: The message to send.
+            session_key: Stable session identifier (e.g. ``"cli:direct"``).
+            channel: Channel label (default ``"cli"``).
+            chat_id: Chat identifier within the channel.
+            on_stream: Optional async ``(token: str) -> None`` callback
+                invoked with each LLM text delta.
+            keep_recent: If > 0, trim the session to this many messages
+                after execution (used by heartbeat to prevent unbounded
+                growth).
+
+        Returns:
+            ``AgentRunResult`` with ``.content``, ``.finish_reason``, etc.
+        """
+        from mxwbot.core.loop import Loop, LoopContext
+
+        msg = InboundMessage(channel=channel, chat_id=chat_id, content=content)
+        session = await self.sessions.get_session(channel, chat_id)
+
+        ctx = LoopContext(
+            msg=msg,
+            session=session,
+            session_key=session_key,
+        )
+        loop = Loop(
+            ctx,
+            sessions=self.sessions,
+            memory=self.memory,
+            context_builder=self.context_builder,
+            runner=self.runner,
+            provider=self.provider,
+            tools=self.tools,
+            checkpoint=self.checkpoint,
+            skills=self.skills,
+            bus=self.bus,
+            max_iterations=self._max_iterations,
+            max_context_tokens=self._max_context_tokens,
+            stream_on_token=on_stream,
+        )
+        await loop.run()
+
+        # Trim session if requested (heartbeat scenario)
+        if keep_recent > 0 and len(session.messages) > keep_recent:
+            session.messages = session.messages[-keep_recent:]
+            session.consolidated_count = 0
+
+        return ctx.result
+
+    # ------------------------------------------------------------------
+    # Shutdown
+    # ------------------------------------------------------------------
 
     async def shutdown(self) -> None:
         """Gracefully stop all running components (reverse order)."""
@@ -266,32 +343,44 @@ class SystemManager:
     # ------------------------------------------------------------------
 
     async def _on_cron_job(self, job: CronJob) -> str | None:
-        channel = job.payload.channel or "system"
-        chat_id = job.payload.to or "cron"
-        msg = InboundMessage(
-            channel=channel,
-            chat_id=chat_id,
-            content=job.payload.message,
+        """Execute a cron job via process_direct, returning agent response."""
+        result = await self.process_direct(
+            job.payload.message,
+            f"cron:{job.id}",
+            channel=job.payload.channel or "system",
+            chat_id=job.payload.to or "cron",
         )
-        await self.bus.publish_inbound(msg)
-        return None  # CronService handles delivery via normal Loop response
+        return result.content if result else None
 
     # ------------------------------------------------------------------
     # Heartbeat callbacks
     # ------------------------------------------------------------------
 
     async def _on_heartbeat_execute(self, tasks: str) -> str | None:
-        msg = InboundMessage(
+        """Execute heartbeat task via process_direct (silent, keep 20 msgs)."""
+        result = await self.process_direct(
+            tasks,
+            "heartbeat",
             channel="heartbeat",
             chat_id="system",
-            content=tasks,
+            keep_recent=20,
         )
-        await self.bus.publish_inbound(msg)
-        return tasks  # passed to on_notify if evaluation says yes
+        return result.content if result else None
 
     async def _on_heartbeat_notify(self, response: str) -> None:
-        # Delivery via normal outbound path is handled by Loop's RESPOND
-        pass
+        """Deliver heartbeat response to the best available channel."""
+        for comp in self.list_components():
+            if "channel" in comp.name and comp.state == ComponentState.RUNNING:
+                ch = comp.instance
+                if hasattr(ch, "_send_text"):
+                    channel_type = comp.name.replace("_channel", "")
+                    for key in list(getattr(self.sessions, "_sessions", {}).keys()):
+                        if key.startswith(channel_type):
+                            session = self.sessions._sessions.get(key)
+                            if session:
+                                await ch._send_text(session.chat_id, response)
+                                return
+        logger.info("Heartbeat response (no active channel): %.200s", response)
 
     # ------------------------------------------------------------------
     # Internal
