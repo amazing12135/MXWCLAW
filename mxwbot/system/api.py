@@ -1,158 +1,236 @@
-"""Management HTTP API — embedded server for CLI admin commands.
+"""Management HTTP API — aiohttp-based admin server.
 
-Listens only on 127.0.0.1 so it is not reachable from the network.
-All state mutations are dispatched via ``run_coroutine_threadsafe``
-to keep the asyncio event loop single-threaded.
+Listens only on 127.0.0.1.  All handlers are plain async functions
+running directly in the main event loop — no threads, no blocking.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+
+from aiohttp import web
 
 logger = logging.getLogger("mxwbot.system.api")
 
 
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def _require_fields(data: dict, *required: str) -> str | None:
+    """Return error message if any required key is missing, else None."""
+    missing = [k for k in required if k not in data]
+    return f"Missing required fields: {', '.join(missing)}" if missing else None
+
+
+def _check_fields(data: dict, path: str, *required: str) -> web.Response | None:
+    """Return 400 JSON response if fields are missing, else None."""
+    err = _require_fields(data, *required)
+    if err:
+        return web.json_response({"error": f"{path}: {err}"}, status=400)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# ManagementAPI
+# ---------------------------------------------------------------------------
+
+
 class ManagementAPI:
-    """Embedded HTTP server for administrative operations.
+    """Async HTTP admin server built on aiohttp.
 
     Args:
-        manager: SystemManager instance (must be fully bootstrapped).
+        manager: ``SystemManager`` instance (must be fully bootstrapped).
         host: Bind address (default 127.0.0.1).
         port: Bind port (default 9090).
     """
 
     def __init__(self, manager: Any, host: str = "127.0.0.1", port: int = 9090) -> None:
         self._manager = manager
-        self._loop = asyncio.get_running_loop()
+        self._host = host
+        self._port = port
+        self._app = web.Application()
+        self._runner: web.AppRunner | None = None
+        self._setup_routes()
 
-        # Bind the handler class to the manager instance
-        mgr = manager
-        loop = self._loop
+    # ------------------------------------------------------------------
+    # Route registration
+    # ------------------------------------------------------------------
 
-        class _Handler(BaseHTTPRequestHandler):
-            def log_message(self, format, *args):
-                logger.debug("API: %s", format % args)
+    def _setup_routes(self) -> None:
+        self._app.add_routes([
+            # -- channel --
+            web.get("/api/channel/list", self._handle_channel_list),
+            web.post("/api/channel/start", self._handle_channel_start),
+            web.post("/api/channel/stop", self._handle_channel_stop),
+            # -- heartbeat --
+            web.post("/api/heartbeat/start", self._handle_heartbeat_start),
+            web.post("/api/heartbeat/stop", self._handle_heartbeat_stop),
+            web.post("/api/heartbeat/run", self._handle_heartbeat_run),
+            web.get("/api/heartbeat/status", self._handle_heartbeat_status),
+            # -- cron --
+            web.get("/api/cron/list", self._handle_cron_list),
+            web.get("/api/cron/status", self._handle_cron_status),
+            web.post("/api/cron/add", self._handle_cron_add),
+            web.delete("/api/cron/{job_id}", self._handle_cron_remove),
+            web.post("/api/cron/{job_id}/enable", self._handle_cron_enable),
+            web.get("/api/cron/{job_id}", self._handle_cron_get),
+            # -- system --
+            web.get("/api/status", self._handle_status),
+        ])
 
-            def _json(self, data: dict, status: int = 200) -> None:
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-            def _read_body(self) -> dict:
-                length = int(self.headers.get("Content-Length", 0))
-                if not length:
-                    return {}
-                return json.loads(self.rfile.read(length))
+    async def start(self) -> None:
+        """Start the aiohttp server."""
+        self._runner = web.AppRunner(self._app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, self._host, self._port)
+        await site.start()
+        logger.info("Management API listening on %s:%d", self._host, self._port)
 
-            def _run_async(self, coro) -> Any:
-                return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30)
+    async def stop(self) -> None:
+        """Gracefully shutdown."""
+        if self._runner:
+            await self._runner.cleanup()
 
-            # -- routing -------------------------------------------------
-            def do_GET(self):
-                path = urlparse(self.path).path
-                if path == "/api/channel/list":
-                    comps = [c for c in mgr.list_components() if "channel" in c.name]
-                    self._json({"channels": [
-                        {"name": c.name, "state": c.state.value} for c in comps
-                    ]})
-                elif path == "/api/heartbeat/status":
-                    self._json(mgr.heartbeat.status() if mgr.heartbeat else {})
-                elif path == "/api/cron/list":
-                    jobs = mgr.cron_service.list_jobs(include_disabled=True) if mgr.cron_service else []
-                    self._json({"jobs": [
-                        {"id": j.id, "name": j.name, "enabled": j.enabled,
-                         "next_run_at_ms": j.state.next_run_at_ms,
-                         "last_status": j.state.last_status}
-                        for j in jobs
-                    ]})
-                elif path == "/api/cron/status":
-                    self._json(mgr.cron_service.status() if mgr.cron_service else {})
-                elif path.startswith("/api/cron/") and not path.endswith("/list") and not path.endswith("/status"):
-                    job_id = path.rsplit("/", 1)[-1]
-                    job = mgr.cron_service.get_job(job_id) if mgr.cron_service else None
-                    if job:
-                        self._json({"id": job.id, "name": job.name, "enabled": job.enabled,
-                                     "schedule": job.schedule.kind, "next_run_at_ms": job.state.next_run_at_ms,
-                                     "payload": job.payload.message})
-                    else:
-                        self._json({"error": "not found"}, 404)
-                elif path == "/api/status":
-                    self._json({
-                        "loop_pool": mgr.is_running("loop_pool"),
-                        "components": {c.name: c.state.value for c in mgr.list_components()},
-                    })
-                else:
-                    self._json({"error": "not found"}, 404)
+    # ------------------------------------------------------------------
+    # Handlers: channel
+    # ------------------------------------------------------------------
 
-            def do_POST(self):
-                path = urlparse(self.path).path
-                qs = parse_qs(urlparse(self.path).query)
+    async def _handle_channel_list(self, _request: web.Request) -> web.Response:
+        mgr = self._manager
+        comps = [c for c in mgr.list_components() if "channel" in c.name]
+        return web.json_response({
+            "channels": [{"name": c.name, "state": c.state.value} for c in comps],
+        })
 
-                if path == "/api/channel/start":
-                    name = qs.get("name", [""])[0]
-                    ok = self._run_async(mgr.start_component(f"{name}_channel"))
-                    self._json({"status": "ok" if ok else "error"})
-                elif path == "/api/channel/stop":
-                    name = qs.get("name", [""])[0]
-                    self._run_async(mgr.stop_component(f"{name}_channel"))
-                    self._json({"status": "ok"})
-                elif path == "/api/heartbeat/start":
-                    self._run_async(mgr.start_component("heartbeat"))
-                    self._json({"status": "ok"})
-                elif path == "/api/heartbeat/stop":
-                    self._run_async(mgr.stop_component("heartbeat"))
-                    self._json({"status": "ok"})
-                elif path == "/api/heartbeat/run":
-                    result = self._run_async(mgr.heartbeat.trigger_now() if mgr.heartbeat else None)
-                    self._json({"status": "ok", "tasks": result})
-                elif path == "/api/cron/add":
-                    body = self._read_body()
-                    sched = body.get("schedule", {})
-                    from mxwbot.cron.types import CronSchedule
-                    job = mgr.cron_service.add_job(
-                        name=body["name"],
-                        schedule=CronSchedule(
-                            kind=sched["kind"],
-                            at_ms=sched.get("at_ms"),
-                            every_ms=sched.get("every_ms"),
-                            expr=sched.get("expr"),
-                            tz=sched.get("tz"),
-                        ),
-                        message=body.get("message", ""),
-                        deliver=body.get("deliver", False),
-                        channel=body.get("channel"),
-                        delete_after_run=body.get("delete_after_run", False),
-                    ) if mgr.cron_service else None
-                    self._json({"id": job.id, "next_run": job.state.next_run_at_ms}) if job else self._json({"error": "no cron service"}, 500)
-                elif path.startswith("/api/cron/") and path.endswith("/enable"):
-                    job_id = path.rsplit("/", 2)[-2]
-                    body = self._read_body()
-                    ok = mgr.cron_service.enable_job(job_id, body.get("enabled", True)) if mgr.cron_service else None
-                    self._json({"status": "ok" if ok else "not found"})
-                else:
-                    self._json({"error": "not found"}, 404)
+    async def _handle_channel_start(self, request: web.Request) -> web.Response:
+        name = request.query.get("name", "")
+        if not name:
+            return web.json_response({"error": "query param 'name' is required"}, status=400)
+        ok = await self._manager.start_component(f"{name}_channel")
+        return web.json_response({"status": "ok" if ok else "error"})
 
-            def do_DELETE(self):
-                path = urlparse(self.path).path
-                if path.startswith("/api/cron/"):
-                    job_id = path.rsplit("/", 1)[-1]
-                    ok = mgr.cron_service.remove_job(job_id) if mgr.cron_service else False
-                    self._json({"status": "ok" if ok else "not found"})
+    async def _handle_channel_stop(self, request: web.Request) -> web.Response:
+        name = request.query.get("name", "")
+        if not name:
+            return web.json_response({"error": "query param 'name' is required"}, status=400)
+        await self._manager.stop_component(f"{name}_channel")
+        return web.json_response({"status": "ok"})
 
-        self._server = HTTPServer((host, port), _Handler)
+    # ------------------------------------------------------------------
+    # Handlers: heartbeat
+    # ------------------------------------------------------------------
 
-    def start(self) -> None:
-        """Start the HTTP server in a daemon thread."""
-        t = threading.Thread(target=self._server.serve_forever, daemon=True)
-        t.start()
-        logger.info("Management API listening on %s:%d", *self._server.server_address)
+    async def _handle_heartbeat_start(self, _request: web.Request) -> web.Response:
+        await self._manager.start_component("heartbeat")
+        return web.json_response({"status": "ok"})
 
-    def stop(self) -> None:
-        self._server.shutdown()
+    async def _handle_heartbeat_stop(self, _request: web.Request) -> web.Response:
+        await self._manager.stop_component("heartbeat")
+        return web.json_response({"status": "ok"})
+
+    async def _handle_heartbeat_run(self, _request: web.Request) -> web.Response:
+        hb = getattr(self._manager, "heartbeat", None)
+        result = await hb.trigger_now() if hb else None
+        return web.json_response({"status": "ok", "tasks": result})
+
+    async def _handle_heartbeat_status(self, _request: web.Request) -> web.Response:
+        hb = getattr(self._manager, "heartbeat", None)
+        return web.json_response(hb.status() if hb else {})
+
+    # ------------------------------------------------------------------
+    # Handlers: cron
+    # ------------------------------------------------------------------
+
+    async def _handle_cron_list(self, _request: web.Request) -> web.Response:
+        cs = self._manager.cron_service
+        jobs = cs.list_jobs(include_disabled=True) if cs else []
+        return web.json_response({
+            "jobs": [
+                {
+                    "id": j.id, "name": j.name, "enabled": j.enabled,
+                    "next_run_at_ms": j.state.next_run_at_ms,
+                    "last_status": j.state.last_status,
+                }
+                for j in jobs
+            ],
+        })
+
+    async def _handle_cron_status(self, _request: web.Request) -> web.Response:
+        cs = self._manager.cron_service
+        return web.json_response(cs.status() if cs else {})
+
+    async def _handle_cron_add(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        resp = _check_fields(body, "body", "name", "message", "schedule")
+        if resp: return resp
+
+        sched = body["schedule"]
+        resp = _check_fields(sched, "body.schedule", "kind")
+        if resp: return resp
+
+        from mxwbot.cron.types import CronSchedule
+        cs = self._manager.cron_service
+        if not cs:
+            return web.json_response({"error": "no cron service"}, status=500)
+
+        job = cs.add_job(
+            name=body["name"],
+            schedule=CronSchedule(
+                kind=sched["kind"],
+                at_ms=sched.get("at_ms"),
+                every_ms=sched.get("every_ms"),
+                expr=sched.get("expr"),
+                tz=sched.get("tz"),
+            ),
+            message=body.get("message", ""),
+            deliver=body.get("deliver", False),
+            channel=body.get("channel"),
+            delete_after_run=body.get("delete_after_run", False),
+        )
+        return web.json_response({"id": job.id, "next_run": job.state.next_run_at_ms})
+
+    async def _handle_cron_remove(self, request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        cs = self._manager.cron_service
+        ok = cs.remove_job(job_id) if cs else False
+        return web.json_response({"status": "ok" if ok else "not found"})
+
+    async def _handle_cron_enable(self, request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        body = await request.json()
+        resp = _check_fields(body, "body", "enabled")
+        if resp: return resp
+
+        cs = self._manager.cron_service
+        ok = cs.enable_job(job_id, body["enabled"]) if cs else None
+        return web.json_response({"status": "ok" if ok else "not found"})
+
+    async def _handle_cron_get(self, request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        cs = self._manager.cron_service
+        job = cs.get_job(job_id) if cs else None
+        if job:
+            return web.json_response({
+                "id": job.id, "name": job.name, "enabled": job.enabled,
+                "schedule": job.schedule.kind,
+                "next_run_at_ms": job.state.next_run_at_ms,
+                "payload": job.payload.message,
+            })
+        return web.json_response({"error": "not found"}, status=404)
+
+    # ------------------------------------------------------------------
+    # Handlers: system
+    # ------------------------------------------------------------------
+
+    async def _handle_status(self, _request: web.Request) -> web.Response:
+        mgr = self._manager
+        return web.json_response({
+            "loop_pool": mgr.is_running("loop_pool"),
+            "components": {c.name: c.state.value for c in mgr.list_components()},
+        })

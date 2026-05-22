@@ -34,7 +34,7 @@ async def serve_cmd(config_path: str, watch: bool = False, verbose: bool = False
 
     # Start management API
     api = ManagementAPI(manager)
-    api.start()
+    await api.start()
 
     # Start watch panel if requested
     panel_task = None
@@ -51,6 +51,6 @@ async def serve_cmd(config_path: str, watch: bool = False, verbose: bool = False
     finally:
         if panel_task:
             panel_task.cancel()
-        api.stop()
+        await api.stop()
         await manager.shutdown()
         logger.info("MXWbot stopped")
