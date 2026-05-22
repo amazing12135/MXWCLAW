@@ -215,6 +215,18 @@ class WeChatChannel(BaseChannel):
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
+    async def _api_get(
+        self, endpoint: str, params: dict | None = None, *, auth: bool = True,
+    ) -> dict:
+        """GET 请求到 ilink API。"""
+        assert self._client is not None
+        url = f"{self._cfg.base_url}/{endpoint}"
+        resp = await self._client.get(
+            url, params=params, headers=self._make_headers(auth=auth),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def _api_post(self, endpoint: str, body: dict) -> dict:
         """POST 请求到 ilink API。"""
         assert self._client is not None
@@ -227,22 +239,110 @@ class WeChatChannel(BaseChannel):
         return resp.json()
 
     # ------------------------------------------------------------------
-    # QR code login
+    # QR code login  (matches nanobot login-qr.ts protocol)
     # ------------------------------------------------------------------
 
+    async def _fetch_qr_code(self) -> tuple[str, str]:
+        """获取 QR 码。返回 (qrcode_id, qrcode_img_content)。"""
+        data = await self._api_get(
+            "ilink/bot/get_bot_qrcode",
+            params={"bot_type": "3"},
+            auth=False,
+        )
+        qrcode_img = data.get("qrcode_img_content", "")
+        qrcode_id = data.get("qrcode", "")
+        if not qrcode_id:
+            raise RuntimeError(f"Failed to get QR code from WeChat API: {data}")
+        return qrcode_id, (qrcode_img or qrcode_id)
+
+    @staticmethod
+    def _print_qr_code(url: str) -> None:
+        """终端显示 QR 码（qrcode 库可用时打印 ASCII，否则打印 URL）。"""
+        try:
+            import qrcode as qr_lib
+            qr = qr_lib.QRCode(border=1)
+            qr.add_data(url)
+            qr.make(fit=True)
+            qr.print_ascii(invert=True)
+        except ImportError:
+            print(f"\nQR Login URL: {url}\n")
+
+    async def _qr_login(self) -> bool:
+        """执行 QR 码登录轮询。匹配 nanobot _qr_login 逻辑。"""
+        refresh_count = 0
+
+        qrcode_id, scan_url = await self._fetch_qr_code()
+        self._print_qr_code(scan_url)
+
+        while True:
+            try:
+                data = await self._api_get(
+                    "ilink/bot/get_qrcode_status",
+                    params={"qrcode": qrcode_id},
+                    auth=False,
+                )
+            except (httpx.TimeoutException, httpx.TransportError):
+                await asyncio.sleep(1)
+                continue
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code >= 500:
+                    await asyncio.sleep(1)
+                    continue
+                raise
+
+            status = data.get("status", "")
+
+            if status == "confirmed":
+                token = data.get("bot_token", "")
+                base_url = data.get("baseurl", "")
+                bot_id = data.get("ilink_bot_id", "")
+                if token:
+                    self._token = token
+                    if base_url:
+                        self._cfg.base_url = base_url
+                    self._save_state()
+                    logger.info(
+                        "WeChat login success: bot_id=%s", bot_id,
+                    )
+                    return True
+                logger.error("Login confirmed but no bot_token in response")
+                return False
+
+            elif status == "scaned_but_redirect":
+                redirect_host = str(data.get("redirect_host", "") or "").strip()
+                if redirect_host:
+                    if not (redirect_host.startswith("http://") or redirect_host.startswith("https://")):
+                        redirect_host = f"https://{redirect_host}"
+                    # Switch to redirected host for subsequent polling
+                    self._cfg.base_url = redirect_host
+                    logger.info("WeChat QR poll redirected to %s", redirect_host)
+
+            elif status == "expired":
+                refresh_count += 1
+                if refresh_count > 3:
+                    logger.warning("QR code expired too many times, giving up")
+                    return False
+                qrcode_id, scan_url = await self._fetch_qr_code()
+                self._print_qr_code(scan_url)
+
+            # "wait" — keep polling
+            await asyncio.sleep(1)
+
     async def login(self, *, force: bool = False) -> bool:
-        """Interactive QR-code login for WeChat ilink bot.
+        """交互式二维码扫码登录。
 
-        If a valid token already exists and *force* is False, returns
-        immediately.  Otherwise the method contacts the ilink API,
-        displays the QR code URL in the terminal, and polls until the
-        user scans it with WeChat (max 120 s).
-
-        On success the token is persisted via ``_save_state()``.
+        获取 QR 码 → 终端显示 → 轮询等待微信扫码确认 → 自动保存 token。
+        成功返回 True。
         """
-        if not force and self._token:
+        if not force and (self._token or self._load_state()):
             logger.info("WeChat: already logged in (use force=True to re-login)")
             return True
+
+        if force:
+            self._token = ""
+            state_file = self._get_state_dir() / "account.json"
+            if state_file.exists():
+                state_file.unlink()
 
         console = None
         try:
@@ -251,111 +351,26 @@ class WeChatChannel(BaseChannel):
         except ImportError:
             pass
 
-        # 1. Create temporary client (no auth token yet)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(30, connect=10),
+        if console:
+            console.print("\n[bold cyan]WeChat QR Login[/bold cyan]")
+            console.print("[dim]Fetching QR code from ilink API…[/dim]\n")
+
+        # 复用 wx 的 client 和 headers（login 阶段不需要 auth token）
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(60, connect=30),
             follow_redirects=True,
-        ) as client:
-            headers = self._make_headers(auth=False)
-            base = self._cfg.base_url
-
-            # 2. Request QR code
-            login_resp = await client.post(
-                f"{base}/ilink/bot/login",
-                json={"base_info": BASE_INFO},
-                headers=headers,
-            )
-            try:
-                login_data = login_resp.json()
-            except Exception:
-                # API may return HTML/empty on unknown endpoints
-                status = login_resp.status_code
-                body = login_resp.text[:500]
-                logger.warning("Login API returned non-JSON (status=%d): %s", status, body)
-                if console:
-                    console.print(f"[red]Login API returned HTTP {status}[/red]")
-                    console.print(f"[dim]{body}[/dim]")
-                    console.print()
-                    console.print("[yellow]QR login is not currently supported by this ilink API.[/yellow]")
-                    console.print("[yellow]Get a token manually and place it in:[/yellow]")
-                    console.print(f"[cyan]{self._get_state_dir() / 'account.json'}[/cyan]")
-                    console.print("[dim]Format: {\"token\": \"your-token-here\"}[/dim]")
-                return False
-            logger.debug("Login response: %s", login_data)
-
-            qr_uuid = (
-                login_data.get("uuid")
-                or login_data.get("qrcode_uuid")
-                or login_data.get("data", {}).get("uuid")
-            )
-            qr_url = (
-                login_data.get("qr_url")
-                or login_data.get("url")
-                or f"https://ilinkai.weixin.qq.com/qr/{qr_uuid}"
-            )
-
-            if not qr_uuid:
-                if console:
-                    console.print(f"[red]Login API returned unexpected data:[/red]")
-                    console.print(login_data)
-                logger.error("WeChat login: no UUID in response: %s", login_data)
-                return False
-
-            # 3. Display QR URL (open in browser to scan)
-            if console:
-                console.print()
-                console.print("[bold cyan]WeChat Login[/bold cyan]")
-                console.print()
-                console.print(f"[bold]QR URL:[/bold] [cyan underline]{qr_url}[/cyan underline]")
-                console.print()
-                console.print("[dim]Copy this URL to your browser, then scan the QR code with WeChat[/dim]")
-                console.print("[dim]Waiting for you to scan… (timeout: 120s)[/dim]")
-                console.print()
-            else:
-                print(f"\nWeChat Login\nQR URL: {qr_url}\n")
-
-            # 4. Poll for scan confirmation (3s interval, 120s timeout)
-            for attempt in range(40):
-                await asyncio.sleep(3)
-                try:
-                    poll_resp = await client.post(
-                        f"{base}/ilink/bot/checklogin",
-                        json={"base_info": BASE_INFO, "uuid": qr_uuid},
-                        headers=headers,
-                    )
-                    poll_data = poll_resp.json()
-
-                    # Try common token field names
-                    token = (
-                        poll_data.get("token")
-                        or poll_data.get("data", {}).get("token")
-                    )
-                    if token:
-                        self._token = token
-                        self._save_state()
-                        if console:
-                            console.print("\n[bold green]✓ Login successful![/bold green]")
-                        logger.info("WeChat login: token saved")
-                        return True
-
-                    status = (
-                        poll_data.get("status")
-                        or poll_data.get("data", {}).get("status")
-                        or poll_data.get("ret")
-                    )
-                    if status in ("scanned", "confirmed", 1):
-                        if console and attempt % 3 == 0:
-                            console.print("[yellow]Scanned! Confirm login on your phone…[/yellow]")
-                    elif status == "expired":
-                        if console:
-                            console.print("[red]QR code expired. Run login again.[/red]")
-                        return False
-                except Exception as exc:
-                    logger.debug("Poll error (attempt %d): %s", attempt + 1, exc)
-
-            if console:
-                console.print("[red]Login timed out (120s).[/red]")
-            return False
+        )
+        try:
+            ok = await self._qr_login()
+            if ok and console:
+                console.print("\n[bold green]✓ Login successful![/bold green]")
+            elif not ok and console:
+                console.print("\n[red]Login failed or timed out.[/red]")
+            return ok
+        finally:
+            if self._client:
+                await self._client.aclose()
+                self._client = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -364,24 +379,32 @@ class WeChatChannel(BaseChannel):
     async def _start(self) -> None:
         """加载 token → 创建 httpx client → 启动长轮询循环。
 
-        Raises:
-            ChannelFatalError: token 完全未配置。
-            ChannelAuthError: token 为空字符串。
+        无 token 时自动触发二维码扫码登录。
         """
         # 加载 token
         if self._cfg.token:
             self._token = self._cfg.token
         else:
-            state_file = self._get_state_dir() / "account.json"
-            if not state_file.exists():
-                raise ChannelFatalError(
-                    "WeChat token not configured. "
-                    "Set WeixinConfig.token or place account.json in state_dir."
-                )
             self._load_state()
 
+        # 无 token 时尝试扫码登录
         if not self._token:
-            raise ChannelAuthError("WeChat token is empty, cannot start")
+            logger.info("WeChat: no token found, starting QR login…")
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60, connect=30),
+                follow_redirects=True,
+            )
+            try:
+                ok = await self._qr_login()
+                if not ok:
+                    raise ChannelAuthError(
+                        "WeChat QR login failed. "
+                        "Run 'mxwbot channel login wechat' to retry."
+                    )
+            finally:
+                if self._client:
+                    await self._client.aclose()
+                    self._client = None
 
         self._next_poll_timeout_s = self._cfg.poll_timeout
         self._client = httpx.AsyncClient(
