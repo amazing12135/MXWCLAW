@@ -235,17 +235,14 @@ class WeChatChannel(BaseChannel):
 
         If a valid token already exists and *force* is False, returns
         immediately.  Otherwise the method contacts the ilink API,
-        displays a QR code in the terminal, and polls until the user
-        scans it with WeChat (max 120 s).
+        displays the QR code URL in the terminal, and polls until the
+        user scans it with WeChat (max 120 s).
 
         On success the token is persisted via ``_save_state()``.
         """
         if not force and self._token:
             logger.info("WeChat: already logged in (use force=True to re-login)")
             return True
-
-        import qrcode
-        from io import BytesIO
 
         console = None
         try:
@@ -289,35 +286,18 @@ class WeChatChannel(BaseChannel):
                 logger.error("WeChat login: no UUID in response: %s", login_data)
                 return False
 
-            # 3. Display QR code in terminal
+            # 3. Display QR URL (open in browser to scan)
             if console:
-                console.print("\n[bold cyan]Scan this QR code with WeChat:[/bold cyan]\n")
-            try:
-                img = qrcode.make(qr_url or f"https://ilinkai.weixin.qq.com/qr/{qr_uuid}")
-                buf = BytesIO()
-                img.save(buf, format="PNG")
-
-                # Try Rich image display; fall back to URL
-                try:
-                    from rich.panel import Panel
-                    from rich.text import Text
-                    console.print(Panel(
-                        Text("\n".join(
-                            "█" * 33 if row % 2 == 0 else "█" + " " * 31 + "█"
-                            for row in range(21)
-                        )),
-                        title="QR Code",
-                    ))
-                except Exception:
-                    pass
-                console.print(f"[dim]QR URL:[/dim] [cyan]{qr_url}[/cyan]")
-                console.print(
-                    "[dim](If QR doesn't display, open the URL above in a browser)[/dim]"
-                )
-            except Exception as exc:
-                logger.warning("QR rendering failed: %s", exc)
-                if console:
-                    console.print(f"[yellow]QR URL:[/yellow] [cyan]{qr_url}[/cyan]")
+                console.print()
+                console.print("[bold cyan]WeChat Login[/bold cyan]")
+                console.print()
+                console.print(f"[bold]QR URL:[/bold] [cyan underline]{qr_url}[/cyan underline]")
+                console.print()
+                console.print("[dim]Copy this URL to your browser, then scan the QR code with WeChat[/dim]")
+                console.print("[dim]Waiting for you to scan… (timeout: 120s)[/dim]")
+                console.print()
+            else:
+                print(f"\nWeChat Login\nQR URL: {qr_url}\n")
 
             # 4. Poll for scan confirmation (3s interval, 120s timeout)
             for attempt in range(40):
