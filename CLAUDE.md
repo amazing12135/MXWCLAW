@@ -22,7 +22,7 @@ uv pip install -e ".[dev]"
 uv pip install <package>
 ```
 
-## Project Progress (9/10 Phases)
+## Project Progress (10/10 Phases)
 
 | Phase | Status | Key Modules |
 |-------|--------|-------------|
@@ -35,7 +35,7 @@ uv pip install <package>
 | 7 Channel | ✅ | `channel/{base,weixin,qq,email}.py` |
 | 8 编排 | ✅ | `core/loop.py` (LoopPool + Loop + LoopContext) |
 | 9 服务 | ✅ | `system/`, `cron/`, `heartbeat/`, `watch/`, `cli/` |
-| 10 测试文档 | ⬜ | 覆盖率 > 80% |
+| 10 测试文档 | ✅ | 覆盖率 > 80% |
 
 ## Architecture Overview
 

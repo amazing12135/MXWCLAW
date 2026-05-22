@@ -74,7 +74,7 @@ class SystemManager:
         self._running = False
 
         # -- shared infrastructure (always created) --------------------------
-        ws = config.workspace_path
+        ws = config.workspace
         self.bus = MessageBus()
         self.sessions = SessionManager(ws)
         self.checkpoint = CheckpointManager(ws)
@@ -116,11 +116,12 @@ class SystemManager:
         from mxwbot.core.tools.web import WebFetchTool, WebSearchTool
         from mxwbot.core.tools.shell import ShellTool
         from mxwbot.core.tools.cron import CronTool
+        ws_path = self.config.workspace
         self.tools = ToolRegistry()
-        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, GlobTool, GrepTool):
-            self.tools.register(cls())
-        for cls in (WebSearchTool, WebFetchTool, ShellTool, CronTool):
-            self.tools.register(cls())
+        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, GlobTool, GrepTool, CronTool, ShellTool):
+            self.tools.register(cls(ws_path))
+        self.tools.register(WebSearchTool())
+        self.tools.register(WebFetchTool())
 
         # Runner
         self.runner = AgentRunner()
@@ -156,8 +157,7 @@ class SystemManager:
         )
 
         # Register components ------------------------------------------------
-        self._register(Component("loop_pool", ComponentState.STOPPED, self.loop_pool,
-            depends_on=["memory", "tools"]))
+        self._register(Component("loop_pool", ComponentState.STOPPED, self.loop_pool))
 
         for ch_cfg in self.config.channels:
             if not ch_cfg.enabled:
