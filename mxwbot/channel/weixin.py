@@ -265,7 +265,22 @@ class WeChatChannel(BaseChannel):
                 json={"base_info": BASE_INFO},
                 headers=headers,
             )
-            login_data = login_resp.json()
+            try:
+                login_data = login_resp.json()
+            except Exception:
+                # API may return HTML/empty on unknown endpoints
+                status = login_resp.status_code
+                body = login_resp.text[:500]
+                logger.warning("Login API returned non-JSON (status=%d): %s", status, body)
+                if console:
+                    console.print(f"[red]Login API returned HTTP {status}[/red]")
+                    console.print(f"[dim]{body}[/dim]")
+                    console.print()
+                    console.print("[yellow]QR login is not currently supported by this ilink API.[/yellow]")
+                    console.print("[yellow]Get a token manually and place it in:[/yellow]")
+                    console.print(f"[cyan]{self._get_state_dir() / 'account.json'}[/cyan]")
+                    console.print("[dim]Format: {\"token\": \"your-token-here\"}[/dim]")
+                return False
             logger.debug("Login response: %s", login_data)
 
             qr_uuid = (
