@@ -99,3 +99,42 @@ class TestHeartbeatService:
         result = await svc.trigger_now()
         assert result == "done"
         assert len(executed) == 1
+
+    @pytest.mark.asyncio
+    async def test_tick_no_file(self, tmp_path):
+        """_tick: HEARTBEAT.md 不存在时跳过."""
+        svc = HeartbeatService(workspace=tmp_path, provider=_FakeProvider())
+        await svc._tick()  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_decide_skip(self):
+        """_decide: LLM 返回 skip 时返回空 tasks."""
+        provider = _FakeProvider(
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(
+                    id="c1", name="heartbeat",
+                    arguments=json.dumps({"action": "skip"}),
+                )],
+                usage=TokenUsage(),
+            )
+        )
+        svc = HeartbeatService(workspace=Path("."), provider=provider)
+        action, tasks = await svc._decide("no tasks")
+        assert action == "skip"
+        assert tasks == ""
+
+    @pytest.mark.asyncio
+    async def test_decide_no_tool_calls(self):
+        """_decide: 无 tool_calls 时默认 skip."""
+        provider = _FakeProvider(
+            LLMResponse(content="ok", usage=TokenUsage())
+        )
+        svc = HeartbeatService(workspace=Path("."), provider=provider)
+        action, tasks = await svc._decide("tasks")
+        assert action == "skip"
+
+    @pytest.mark.asyncio
+    async def test_read_file_missing(self):
+        svc = HeartbeatService(workspace=Path("/nonexistent"), provider=_FakeProvider())
+        assert svc._read_file() is None
