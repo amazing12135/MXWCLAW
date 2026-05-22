@@ -184,8 +184,29 @@ class SystemManager:
             logger.info("Starting %s …", comp.name)
             await self.start_component(comp.name)
 
+        # Start channel outbound consumers (read bus → send to platform)
+        self._outbound_tasks: list[asyncio.Task] = []
+        for comp in self.list_components():
+            if "channel" in comp.name and comp.state == ComponentState.RUNNING:
+                ch = comp.instance
+                t = asyncio.create_task(self._channel_outbound_loop(ch))
+                self._outbound_tasks.append(t)
+                logger.info("Channel %s outbound consumer started", comp.name)
+
         logger.info("All components started — consuming messages")
         await self.loop_pool.start()
+
+    async def _channel_outbound_loop(self, channel: Any) -> None:
+        """Read OutboundMessage from the bus queue and send via channel."""
+        queue = await self.bus.subscribe(channel.name)
+        while self._running:
+            try:
+                msg = await queue.get()
+                await channel.send(msg)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Channel send failed for %s", channel.name)
 
     # ------------------------------------------------------------------
     # process_direct — synchronous agent call
@@ -264,6 +285,9 @@ class SystemManager:
     async def shutdown(self) -> None:
         """Gracefully stop all running components (reverse order)."""
         self._running = False
+        # Cancel channel outbound consumers first
+        for t in getattr(self, "_outbound_tasks", []):
+            t.cancel()
         for comp in reversed(self._topological_order()):
             if comp.state == ComponentState.RUNNING:
                 await self.stop_component(comp.name)
