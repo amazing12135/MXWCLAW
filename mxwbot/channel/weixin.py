@@ -227,6 +227,142 @@ class WeChatChannel(BaseChannel):
         return resp.json()
 
     # ------------------------------------------------------------------
+    # QR code login
+    # ------------------------------------------------------------------
+
+    async def login(self, *, force: bool = False) -> bool:
+        """Interactive QR-code login for WeChat ilink bot.
+
+        If a valid token already exists and *force* is False, returns
+        immediately.  Otherwise the method contacts the ilink API,
+        displays a QR code in the terminal, and polls until the user
+        scans it with WeChat (max 120 s).
+
+        On success the token is persisted via ``_save_state()``.
+        """
+        if not force and self._token:
+            logger.info("WeChat: already logged in (use force=True to re-login)")
+            return True
+
+        import qrcode
+        from io import BytesIO
+
+        console = None
+        try:
+            from rich.console import Console
+            console = Console()
+        except ImportError:
+            pass
+
+        # 1. Create temporary client (no auth token yet)
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(30, connect=10),
+            follow_redirects=True,
+        ) as client:
+            headers = self._make_headers(auth=False)
+            base = self._cfg.base_url
+
+            # 2. Request QR code
+            login_resp = await client.post(
+                f"{base}/ilink/bot/login",
+                json={"base_info": BASE_INFO},
+                headers=headers,
+            )
+            login_data = login_resp.json()
+            logger.debug("Login response: %s", login_data)
+
+            qr_uuid = (
+                login_data.get("uuid")
+                or login_data.get("qrcode_uuid")
+                or login_data.get("data", {}).get("uuid")
+            )
+            qr_url = (
+                login_data.get("qr_url")
+                or login_data.get("url")
+                or f"https://ilinkai.weixin.qq.com/qr/{qr_uuid}"
+            )
+
+            if not qr_uuid:
+                if console:
+                    console.print(f"[red]Login API returned unexpected data:[/red]")
+                    console.print(login_data)
+                logger.error("WeChat login: no UUID in response: %s", login_data)
+                return False
+
+            # 3. Display QR code in terminal
+            if console:
+                console.print("\n[bold cyan]Scan this QR code with WeChat:[/bold cyan]\n")
+            try:
+                img = qrcode.make(qr_url or f"https://ilinkai.weixin.qq.com/qr/{qr_uuid}")
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+
+                # Try Rich image display; fall back to URL
+                try:
+                    from rich.panel import Panel
+                    from rich.text import Text
+                    console.print(Panel(
+                        Text("\n".join(
+                            "█" * 33 if row % 2 == 0 else "█" + " " * 31 + "█"
+                            for row in range(21)
+                        )),
+                        title="QR Code",
+                    ))
+                except Exception:
+                    pass
+                console.print(f"[dim]QR URL:[/dim] [cyan]{qr_url}[/cyan]")
+                console.print(
+                    "[dim](If QR doesn't display, open the URL above in a browser)[/dim]"
+                )
+            except Exception as exc:
+                logger.warning("QR rendering failed: %s", exc)
+                if console:
+                    console.print(f"[yellow]QR URL:[/yellow] [cyan]{qr_url}[/cyan]")
+
+            # 4. Poll for scan confirmation (3s interval, 120s timeout)
+            for attempt in range(40):
+                await asyncio.sleep(3)
+                try:
+                    poll_resp = await client.post(
+                        f"{base}/ilink/bot/checklogin",
+                        json={"base_info": BASE_INFO, "uuid": qr_uuid},
+                        headers=headers,
+                    )
+                    poll_data = poll_resp.json()
+
+                    # Try common token field names
+                    token = (
+                        poll_data.get("token")
+                        or poll_data.get("data", {}).get("token")
+                    )
+                    if token:
+                        self._token = token
+                        self._save_state()
+                        if console:
+                            console.print("\n[bold green]✓ Login successful![/bold green]")
+                        logger.info("WeChat login: token saved")
+                        return True
+
+                    status = (
+                        poll_data.get("status")
+                        or poll_data.get("data", {}).get("status")
+                        or poll_data.get("ret")
+                    )
+                    if status in ("scanned", "confirmed", 1):
+                        if console and attempt % 3 == 0:
+                            console.print("[yellow]Scanned! Confirm login on your phone…[/yellow]")
+                    elif status == "expired":
+                        if console:
+                            console.print("[red]QR code expired. Run login again.[/red]")
+                        return False
+                except Exception as exc:
+                    logger.debug("Poll error (attempt %d): %s", attempt + 1, exc)
+
+            if console:
+                console.print("[red]Login timed out (120s).[/red]")
+            return False
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 

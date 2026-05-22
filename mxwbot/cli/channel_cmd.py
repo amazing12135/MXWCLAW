@@ -1,5 +1,6 @@
 """channel subcommands — control active channels via ManagementAPI."""
 
+import asyncio
 import httpx
 import typer
 
@@ -51,3 +52,25 @@ def list_channels():
     for ch in r.get("channels", []):
         icon = "✓" if ch["state"] == "running" else "✗" if ch["state"] == "error" else "⋯"
         typer.echo(f"  {icon}  {ch['name']:20}  {ch['state']}")
+
+
+@channel_app.command("login")
+def login(
+    name: str = typer.Argument("wechat", help="Channel to login: wechat"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force re-login"),
+):
+    """Interactive QR code login for WeChat (ilink)."""
+    if name != "wechat":
+        typer.echo(f"Login not supported for '{name}'. Only wechat is supported.", err=True)
+        raise typer.Exit(1)
+
+    from mxwbot.channel.weixin import WeChatChannel, WeixinConfig
+
+    cfg = WeixinConfig()
+    ch = WeChatChannel(bus=None, config=cfg)
+    ok = asyncio.run(ch.login(force=force))
+    if not ok:
+        typer.echo("Login failed. Check the QR URL and try again.", err=True)
+        raise typer.Exit(1)
+
+    typer.echo("\nToken saved. Start the gateway with: mxwbot serve")
