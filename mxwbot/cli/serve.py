@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from mxwbot.config.loader import load_config
+from mxwbot.cli._config import load_runtime_config
 from mxwbot.system.api import ManagementAPI
 from mxwbot.system.manager import SystemManager
 from mxwbot.watch.metrics import MetricsCollector
@@ -24,7 +24,7 @@ async def serve_cmd(config_path: str, watch: bool = False, verbose: bool = False
         logging.basicConfig(level=logging.INFO)
 
     # Load config
-    cfg = load_config(Path(config_path))
+    cfg = load_runtime_config(config_path)
     logger.info("Config loaded: %d providers, %d channels",
                 len(cfg.providers), len(cfg.channels))
 

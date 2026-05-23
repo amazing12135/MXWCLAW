@@ -126,24 +126,7 @@ class SystemManager:
         # Runner
         self.runner = AgentRunner()
 
-        # Cron service
-        cron_path = self.config.workspace / "cron" / "jobs.json"
-        self.cron_service = CronService(
-            store_path=cron_path,
-            on_job=self._on_cron_job,
-        )
-
-        # Heartbeat
-        hb_cfg = self.config.heartbeat
-        self.heartbeat = HeartbeatService(
-            workspace=self.config.workspace,
-            provider=self.provider,
-            enabled=hb_cfg.enabled,
-            on_execute=self._on_heartbeat_execute,
-            on_notify=self._on_heartbeat_notify,
-        )
-
-        # LoopPool
+        # LoopPool (core processing engine — shared by all paths)
         self.loop_pool = LoopPool(
             bus=self.bus,
             sessions=self.sessions,
@@ -156,9 +139,14 @@ class SystemManager:
             skills=self.skills,
         )
 
-        # Register components ------------------------------------------------
+        # Register core component
         self._register(Component("loop_pool", ComponentState.STOPPED, self.loop_pool))
 
+    async def serve(self) -> None:
+        """Start all components: channels, cron, heartbeat + outbound consumers."""
+        self._running = True
+
+        # Create and register channels
         for ch_cfg in self.config.channels:
             if not ch_cfg.enabled:
                 continue
@@ -167,24 +155,34 @@ class SystemManager:
             self._register(Component(name, ComponentState.STOPPED, instance,
                 depends_on=["loop_pool"]))
 
+        # Create and register cron service
+        cron_path = self.config.workspace / "cron" / "jobs.json"
+        self.cron_service = CronService(
+            store_path=cron_path,
+            on_job=self._on_cron_job,
+        )
         self._register(Component("cron", ComponentState.STOPPED, self.cron_service,
             depends_on=["loop_pool"]))
+
+        # Create and register heartbeat
+        hb_cfg = self.config.heartbeat
+        self.heartbeat = HeartbeatService(
+            workspace=self.config.workspace,
+            provider=self.provider,
+            enabled=hb_cfg.enabled,
+            on_execute=self._on_heartbeat_execute,
+            on_notify=self._on_heartbeat_notify,
+        )
         self._register(Component("heartbeat", ComponentState.STOPPED, self.heartbeat,
             depends_on=["loop_pool"]))
 
-        # Agent defaults (used by process_direct)
-        self._max_iterations = getattr(self.config.agent, "max_iterations", 3)
-        self._max_context_tokens = 80_000  # TODO: derive from provider context window
-
-    async def serve(self) -> None:
-        """Start all registered components."""
-        self._running = True
+        # Start all in dependency order
         order = self._topological_order()
         for comp in order:
             logger.info("Starting %s …", comp.name)
             await self.start_component(comp.name)
 
-        # Start channel outbound consumers (read bus → send to platform)
+        # Start channel outbound consumers
         self._outbound_tasks: list[asyncio.Task] = []
         for comp in self.list_components():
             if "channel" in comp.name and comp.state == ComponentState.RUNNING:
@@ -207,76 +205,6 @@ class SystemManager:
                 break
             except Exception:
                 logger.exception("Channel send failed for %s", channel.name)
-
-    # ------------------------------------------------------------------
-    # process_direct — synchronous agent call
-    # ------------------------------------------------------------------
-
-    async def process_direct(
-        self,
-        content: str,
-        session_key: str,
-        *,
-        channel: str = "cli",
-        chat_id: str = "direct",
-        on_stream: Any = None,
-        keep_recent: int = 0,
-    ) -> Any:  # AgentRunResult
-        """Send a message directly to the agent and wait for the result.
-
-        Unlike serve mode (which uses LoopPool's async consumer), this
-        method creates a Loop inline and runs the full 8-state pipeline
-        synchronously from the caller's perspective.  The caller receives
-        the ``AgentRunResult`` directly.
-
-        Args:
-            content: The message to send.
-            session_key: Stable session identifier (e.g. ``"cli:direct"``).
-            channel: Channel label (default ``"cli"``).
-            chat_id: Chat identifier within the channel.
-            on_stream: Optional async ``(token: str) -> None`` callback
-                invoked with each LLM text delta.
-            keep_recent: If > 0, trim the session to this many messages
-                after execution (used by heartbeat to prevent unbounded
-                growth).
-
-        Returns:
-            ``AgentRunResult`` with ``.content``, ``.finish_reason``, etc.
-        """
-        from mxwbot.core.loop import Loop, LoopContext
-
-        msg = InboundMessage(channel=channel, chat_id=chat_id, content=content)
-        session = await self.sessions.get_session(channel, chat_id)
-
-        ctx = LoopContext(
-            msg=msg,
-            session=session,
-            session_key=session_key,
-        )
-        loop = Loop(
-            ctx,
-            sessions=self.sessions,
-            memory=self.memory,
-            context_builder=self.context_builder,
-            runner=self.runner,
-            provider=self.provider,
-            tools=self.tools,
-            checkpoint=self.checkpoint,
-            skills=self.skills,
-            bus=self.bus,
-            max_iterations=self._max_iterations,
-            max_context_tokens=self._max_context_tokens,
-            stream_on_token=on_stream,
-            skip_confirmation=True,
-        )
-        await loop.run()
-
-        # Trim session if requested (heartbeat scenario)
-        if keep_recent > 0 and len(session.messages) > keep_recent:
-            session.messages = session.messages[-keep_recent:]
-            session.consolidated_count = 0
-
-        return ctx.result
 
     # ------------------------------------------------------------------
     # Shutdown
@@ -368,8 +296,8 @@ class SystemManager:
     # ------------------------------------------------------------------
 
     async def _on_cron_job(self, job: CronJob) -> str | None:
-        """Execute a cron job via process_direct, returning agent response."""
-        result = await self.process_direct(
+        """Execute a cron job via LoopPool, returning agent response."""
+        result = await self.loop_pool.process_direct(
             job.payload.message,
             f"cron:{job.id}",
             channel=job.payload.channel or "system",
@@ -382,8 +310,8 @@ class SystemManager:
     # ------------------------------------------------------------------
 
     async def _on_heartbeat_execute(self, tasks: str) -> str | None:
-        """Execute heartbeat task via process_direct (silent, keep 20 msgs)."""
-        result = await self.process_direct(
+        """Execute heartbeat task via LoopPool (silent, keep 20 msgs)."""
+        result = await self.loop_pool.process_direct(
             tasks,
             "heartbeat",
             channel="heartbeat",

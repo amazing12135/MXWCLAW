@@ -345,7 +345,7 @@ class Loop:
 
         stream_hook = _BusStreamHook(
             self._bus, channel, chat_id,
-            on_stream=self._stream_on_token,
+            on_stream=self._stream_on_token or _get_direct_stream(self.ctx, self._bus),
         )
 
         # Signal stream start
@@ -444,6 +444,12 @@ class Loop:
             msg_type="message",
             reply_to=self.ctx.msg.id,
         ))
+
+        # Resolve direct-call future (process_direct)
+        direct_id = self.ctx.msg.metadata.get("_direct_id")
+        if direct_id:
+            self._bus.resolve_direct(direct_id, result)
+
         return "ok"
 
     # ------------------------------------------------------------------
@@ -518,6 +524,15 @@ class Loop:
 # LoopPool — concurrent message consumer
 # ---------------------------------------------------------------------------
 
+def _get_direct_stream(ctx: LoopContext, bus: Any) -> Any:
+    """If this is a direct-call message, return the caller's on_stream callback."""
+    direct_id = ctx.msg.metadata.get("_direct_id")
+    if not direct_id:
+        return None
+    entry = getattr(bus, "_pending_directs", {}).get(direct_id)
+    return entry[1] if entry else None
+
+
 class LoopPool:
     """Long-lived message consumer with concurrency control.
 
@@ -580,6 +595,47 @@ class LoopPool:
     async def stop(self) -> None:
         """Gracefully stop the consumer loop."""
         self._running = False
+
+    async def process_direct(
+        self, content: str, session_key: str, *,
+        channel: str = "cli", chat_id: str = "direct",
+        on_stream: Any = None, keep_recent: int = 0,
+        timeout: float = 300,
+    ) -> Any:  # AgentRunResult
+        """Send a message through the bus and wait for the result.
+
+        Unlike the old SystemManager.process_direct which created an
+        inline Loop, this publishes to the bus and lets LoopPool's
+        consumer handle it — the same path as all other messages.
+        """
+        import uuid
+
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        msg_id = str(uuid.uuid4())[:8]
+
+        msg = InboundMessage(
+            channel=channel, chat_id=chat_id,
+            content=content,
+            metadata={"_direct_id": msg_id},
+        )
+
+        self._bus.register_direct(msg_id, fut, on_stream)
+
+        await self._bus.publish_inbound(msg)
+        try:
+            result = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._bus._pending_directs.pop(msg_id, None)
+            raise
+
+        # Trim session if requested
+        if keep_recent > 0:
+            session = await self._sessions.get_session(channel, chat_id)
+            if len(session.messages) > keep_recent:
+                session.messages = session.messages[-keep_recent:]
+                session.consolidated_count = 0
+
+        return result
 
     # ------------------------------------------------------------------
     # Internal

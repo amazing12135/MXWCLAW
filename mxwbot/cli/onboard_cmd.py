@@ -10,34 +10,21 @@ from rich.prompt import Confirm, Prompt
 
 console = Console()
 
-_DEFAULT_CONFIG_YAML = """# MXWbot configuration
-workspace: .mxwbot
-log_level: INFO
 
-providers:
-  - name: openai
-    api_key: "sk-your-key-here"
-    model: gpt-4
-    max_tokens: 4096
-    temperature: 0.7
+def _generate_default_config_yaml() -> str:
+    """Generate default config.yaml from MXWConfig schema."""
+    import yaml
+    from mxwbot.config.schema import MXWConfig, ProviderConfig
 
-channels:
-  - type: wechat
-    enabled: false
-  - type: email
-    enabled: false
+    cfg = MXWConfig()
+    data = cfg.model_dump()
+    # Add a helpful provider placeholder
+    data["providers"] = [ProviderConfig().model_dump()]
+    data["providers"][0]["name"] = "openai"
+    data["providers"][0]["api_key"] = "sk-your-key-here"
+    data["providers"][0]["model"] = "gpt-4"
+    return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-tools:
-  filesystem_enabled: true
-  shell:
-    enabled: true
-    timeout_seconds: 30
-
-agent:
-  max_iterations: 5
-  timeout_seconds: 120
-  checkpoint_interval: 2
-"""
 
 _HEARTBEAT_TEMPLATE = """# Heartbeat Tasks
 
@@ -53,7 +40,7 @@ Leave empty to disable heartbeat task checking.
 
 
 def _create_default_config(config_path: Path) -> None:
-    config_path.write_text(_DEFAULT_CONFIG_YAML, encoding="utf-8")
+    config_path.write_text(_generate_default_config_yaml(), encoding="utf-8")
     console.print(f"[green]✓[/green] Created config at {config_path}")
 
 

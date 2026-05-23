@@ -35,6 +35,26 @@ class MessageBus:
         # Confirmation handshake
         self._pending: dict[str, asyncio.Event] = {}
         self._results: dict[str, bool] = {}
+        # Direct call responses: msg_id → (Future, on_stream_callback)
+        self._pending_directs: dict[str, tuple[asyncio.Future, Any]] = {}
+
+    # -- direct call ---------------------------------------------------------
+
+    def register_direct(self, msg_id: str, future: asyncio.Future, on_stream: Any = None) -> None:
+        self._pending_directs[msg_id] = (future, on_stream)
+
+    def resolve_direct(self, msg_id: str, result: Any) -> bool:
+        entry = self._pending_directs.pop(msg_id, None)
+        if entry is None:
+            return False
+        fut, _ = entry
+        if not fut.done():
+            fut.set_result(result)
+        return True
+
+    @property
+    def pending_directs(self) -> dict:
+        return self._pending_directs
 
     # -- inbound ------------------------------------------------------------
 

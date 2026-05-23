@@ -15,7 +15,7 @@ from pathlib import Path
 
 import typer
 
-from mxwbot.config.loader import load_config
+from mxwbot.cli._config import load_runtime_config
 from mxwbot.system.manager import SystemManager
 
 logger = logging.getLogger("mxwbot.cli.agent")
@@ -35,7 +35,7 @@ async def _run_single(
 
     renderer = StreamRenderer(render_markdown=markdown)
 
-    result = await manager.process_direct(
+    result = await manager.loop_pool.process_direct(
         message,
         session_id,
         on_stream=renderer.on_delta,
@@ -98,7 +98,7 @@ async def _run_interactive(
 
         renderer = StreamRenderer(render_markdown=markdown)
         try:
-            result = await manager.process_direct(
+            result = await manager.loop_pool.process_direct(
                 line, session_id,
                 on_stream=renderer.on_delta,
             )
@@ -134,13 +134,8 @@ async def agent_cmd(
     else:
         logging.basicConfig(level=logging.WARNING)
 
-    # Load config (use defaults if no config file exists)
-    try:
-        cfg = load_config(Path(config_path) if config_path else None)
-    except Exception:
-        from mxwbot.config.schema import MXWConfig
-        cfg = MXWConfig()
-        logger.info("No config found, using defaults")
+    # Load config
+    cfg = load_runtime_config(config_path, auto_create=True)
 
     manager = SystemManager(cfg)
     await manager.bootstrap()

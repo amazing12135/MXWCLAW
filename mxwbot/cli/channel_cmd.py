@@ -65,8 +65,18 @@ def login(
         raise typer.Exit(1)
 
     from mxwbot.channel.weixin import WeChatChannel, WeixinConfig
+    from pathlib import Path
 
-    cfg = WeixinConfig()
+    #从config推导出state_dir，与serve保持一致
+    state_dir=None
+    try:
+        from mxwbot.config.loader import load_config
+        ws=load_config().workspace
+        state_dir=Path(ws) / "weixin"
+    except Exception:
+        pass
+
+    cfg = WeixinConfig(state_dir=state_dir or "")
     ch = WeChatChannel(bus=None, config=cfg)
     ok = asyncio.run(ch.login(force=force))
     if not ok:
