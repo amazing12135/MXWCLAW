@@ -30,7 +30,7 @@ class TestProcessDirect:
         mgr = SystemManager(cfg)
         await mgr.bootstrap()
 
-        result = await mgr.process_direct("hello", "test:u1")
+        result = await mgr.loop_pool.process_direct("hello", "test:u1")
         assert result is not None
         assert hasattr(result, "content")
         assert hasattr(result, "finish_reason")
@@ -47,7 +47,7 @@ class TestProcessDirect:
         async def on_token(token):
             tokens.append(token)
 
-        result = await mgr.process_direct("hi", "test:u2", on_stream=on_token)
+        result = await mgr.loop_pool.process_direct("hi", "test:u2", on_stream=on_token)
         assert result is not None
 
     @pytest.mark.asyncio
@@ -57,9 +57,9 @@ class TestProcessDirect:
         mgr = SystemManager(cfg)
         await mgr.bootstrap()
 
-        await mgr.process_direct("msg1", "test:u3", keep_recent=2)
-        await mgr.process_direct("msg2", "test:u3", keep_recent=2)
-        await mgr.process_direct("msg3", "test:u3", keep_recent=2)
+        await mgr.loop_pool.process_direct("msg1", "test:u3", keep_recent=2)
+        await mgr.loop_pool.process_direct("msg2", "test:u3", keep_recent=2)
+        await mgr.loop_pool.process_direct("msg3", "test:u3", keep_recent=2)
 
         session = await mgr.sessions.get_session("cli", "direct")
         # After 3 calls with keep_recent=2, session should have ≤ 2 messages
@@ -72,7 +72,7 @@ class TestProcessDirect:
         mgr = SystemManager(cfg)
         await mgr.bootstrap()
 
-        result = await mgr.process_direct(
+        result = await mgr.loop_pool.process_direct(
             "ping", "wechat:u99",
             channel="wechat", chat_id="u99",
         )
