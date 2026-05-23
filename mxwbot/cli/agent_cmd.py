@@ -140,10 +140,15 @@ async def agent_cmd(
     manager = SystemManager(cfg)
     await manager.bootstrap()
 
+    # Start LoopPool consumer in background (needed by process_direct)
+    consumer_task = asyncio.create_task(manager.loop_pool._consume())
+
     try:
         if message:
             await _run_single(manager, message, session_id, markdown=markdown)
         else:
             await _run_interactive(manager, session_id, markdown=markdown)
     finally:
+        manager.loop_pool.stop()
+        consumer_task.cancel()
         await manager.shutdown()
