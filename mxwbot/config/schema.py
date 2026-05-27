@@ -115,6 +115,7 @@ class ExecToolConfig(BaseModel):
 
     enabled: bool = True
     timeout_seconds: int = Field(default=60, ge=1)
+    sandbox_backend: str = Field(default="bwrap", description="Sandbox backend: 'bwrap' (Linux) or 'none' (Windows)")
     allowed_env: list[str] = Field(default_factory=lambda: ["PATH", "HOME", "USER", "LANG"])
     pattern_whitelist: list[str] = Field(default_factory=list)
     pattern_blacklist: list[str] = Field(default_factory=list)
@@ -147,6 +148,7 @@ class ToolsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     filesystem_enabled: bool = True
+    unrestricted_filesystem: bool = Field(default=False, description="Allow file tools to access any path (not just workspace)")
     allowed_dirs: list[Path] = Field(default_factory=list)
     shell: ExecToolConfig = Field(default_factory=ExecToolConfig)
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
@@ -189,6 +191,7 @@ class AgentDefaultConfig(BaseModel):
     checkpoint_interval: int = Field(default=2, ge=1)
     max_concurrent_sessions: int = Field(default=20, ge=1)
     max_subagents: int = Field(default=5, ge=0)
+    skip_confirmation: bool = Field(default=False, description="Skip write-operation confirmation prompts")
 
 
 # ---------------------------------------------------------------------------

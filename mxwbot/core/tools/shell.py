@@ -84,12 +84,14 @@ class ShellTool(Tool):
         workspace: Path,
         *,
         timeout: int = 60,
+        sandbox_backend: str = "bwrap",
         allow_patterns: list[str] | None = None,
         deny_patterns: list[str] | None = None,
         path_append: str = "",
     ):
         self._workspace = workspace
         self._timeout = timeout
+        self._sandbox_backend = sandbox_backend
         self._allow_patterns = allow_patterns or []
         self._deny_patterns = _DEFAULT_DENY_PATTERNS + (deny_patterns or [])
         self._path_append = path_append
@@ -138,9 +140,15 @@ class ShellTool(Tool):
             except ValueError:
                 return ToolResult(success=False, error=_WORKSPACE_BOUNDARY_NOTE)
 
-        # 6. 沙箱包装（bwrap 不可用时拒绝）
+        # 6. 沙箱包装
+        backend = self._sandbox_backend
+        if backend == "bwrap" and not shutil.which("bwrap"):
+            return ToolResult(
+                success=False,
+                error="bwrap 未安装。Windows 请设置 tools.shell.sandbox_backend='none'",
+            )
         try:
-            wrapped = wrap_command("bwrap", command, ws, cwd)
+            wrapped = wrap_command(backend, command, ws, cwd)
         except ValueError as e:
             return ToolResult(success=False, error=str(e))
 

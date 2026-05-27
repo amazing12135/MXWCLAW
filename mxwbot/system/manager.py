@@ -117,9 +117,19 @@ class SystemManager:
         from mxwbot.core.tools.shell import ShellTool
         from mxwbot.core.tools.cron import CronTool
         ws_path = self.config.workspace
+        tool_cfg = self.config.tools
+        unrestricted = tool_cfg.unrestricted_filesystem
         self.tools = ToolRegistry()
-        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, GlobTool, GrepTool, CronTool, ShellTool):
-            self.tools.register(cls(ws_path))
+        # File tools — with optional unrestricted filesystem access
+        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, GlobTool, GrepTool):
+            self.tools.register(cls(ws_path, unrestricted=unrestricted))
+        # Shell tool — with configurable sandbox backend
+        self.tools.register(ShellTool(
+            ws_path,
+            timeout=tool_cfg.shell.timeout_seconds,
+            sandbox_backend=tool_cfg.shell.sandbox_backend,
+        ))
+        self.tools.register(CronTool(ws_path))
         self.tools.register(WebSearchTool())
         self.tools.register(WebFetchTool())
         # Meta-tool for lazy-loading extension tool definitions
@@ -130,6 +140,7 @@ class SystemManager:
         self.runner = AgentRunner()
 
         # LoopPool (core processing engine — shared by all paths)
+        agent_cfg = self.config.agent
         self.loop_pool = LoopPool(
             bus=self.bus,
             sessions=self.sessions,
@@ -140,6 +151,10 @@ class SystemManager:
             tools=self.tools,
             checkpoint=self.checkpoint,
             skills=self.skills,
+            max_concurrent=agent_cfg.max_concurrent_sessions,
+            checkpoint_interval=agent_cfg.checkpoint_interval,
+            max_iterations=agent_cfg.max_iterations,
+            skip_confirmation=agent_cfg.skip_confirmation,
         )
 
         # Register core component

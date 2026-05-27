@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>阶级斗争万岁</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        /* 动态背景粒子 */
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: #c62828;
+            border-radius: 50%;
+            animation: float linear infinite;
+            opacity: 0.4;
+        }
+
+        @keyframes float {
+            0% {
+                transform: translateY(100vh) scale(0);
+                opacity: 0;
+            }
+            10% {
+                opacity: 0.5;
+            }
+            90% {
+                opacity: 0.5;
+            }
+            100% {
+                transform: translateY(-10vh) scale(1);
+                opacity: 0;
+            }
+        }
+
+        .container {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+            max-width: 720px;
+            padding: 3rem 2rem;
+        }
+
+        /* 红星光晕 */
+        .glow {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(198, 40, 40, 0.08) 0%, transparent 70%);
+            border-radius: 50%;
+            z-index: -1;
+            animation: pulse 6s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
+            50% { transform: translate(-50%, -50%) scale(1.3); opacity: 1; }
+        }
+
+        h1 {
+            font-size: 3.5rem;
+            font-weight: 700;
+            letter-spacing: 6px;
+            color: #c62828;
+            text-shadow: 0 0 40px rgba(198, 40, 40, 0.3), 0 4px 8px rgba(0,0,0,0.5);
+            margin-bottom: 1.2rem;
+            line-height: 1.3;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            font-weight: 300;
+            letter-spacing: 8px;
+            color: #9e9e9e;
+            margin-bottom: 3rem;
+            border-top: 1px solid rgba(198, 40, 40, 0.3);
+            border-bottom: 1px solid rgba(198, 40, 40, 0.3);
+            padding: 1rem 0;
+            display: inline-block;
+        }
+
+        .slogans {
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+            margin: 2.5rem 0;
+        }
+
+        .slogans p {
+            font-size: 1rem;
+            letter-spacing: 3px;
+            color: #bdbdbd;
+            font-weight: 300;
+            opacity: 0.8;
+            transition: opacity 0.3s, color 0.3s;
+            cursor: default;
+        }
+
+        .slogans p:hover {
+            opacity: 1;
+            color: #ef5350;
+        }
+
+        .separator {
+            width: 60px;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, #c62828, transparent);
+            margin: 2rem auto;
+        }
+
+        .quote {
+            font-size: 0.95rem;
+            color: #757575;
+            font-style: italic;
+            letter-spacing: 1px;
+            line-height: 1.8;
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .quote span {
+            color: #c62828;
+        }
+
+        .footer {
+            margin-top: 3rem;
+            font-size: 0.75rem;
+            color: #424242;
+            letter-spacing: 2px;
+        }
+
+        /* 响应式 */
+        @media (max-width: 600px) {
+            h1 {
+                font-size: 2.2rem;
+                letter-spacing: 4px;
+            }
+            .subtitle {
+                font-size: 0.9rem;
+                letter-spacing: 4px;
+            }
+            .container {
+                padding: 2rem 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- 粒子背景 -->
+    <div class="particles" id="particles"></div>
+
+    <div class="container">
+        <div class="glow"></div>
+        <h1>阶级斗争万岁</h1>
+        <div class="subtitle">✧ 全世界无产者，联合起来 ✧</div>
+
+        <div class="slogans">
+            <p>· 消灭剥削 · 消灭压迫 ·</p>
+            <p>· 平等 · 自由 · 解放 ·</p>
+            <p>· 为真理而斗争 ·</p>
+        </div>
+
+        <div class="separator"></div>
+
+        <div class="quote">
+            "让统治阶级在共产主义革命面前发抖吧。<br>
+            无产者在这个革命中失去的只是<span>锁链</span>，<br>
+            他们获得的将是<span>整个世界</span>。"
+        </div>
+
+        <div class="footer">— THE INTERNATIONAL —</div>
+    </div>
+
+    <script>
+        // 生成动态粒子
+        const container = document.getElementById('particles');
+        const count = 35;
+        for (let i = 0; i < count; i++) {
+            const p = document.createElement('div');
+            p.className = 'particle';
+            const size = Math.random() * 3 + 1;
+            p.style.width = size + 'px';
+            p.style.height = size + 'px';
+            p.style.left = Math.random() * 100 + '%';
+            p.style.animationDuration = (Math.random() * 12 + 8) + 's';
+            p.style.animationDelay = (Math.random() * 10) + 's';
+            p.style.background = Math.random() > 0.5 ? '#c62828' : '#e53935';
+            container.appendChild(p);
+        }
+    </script>
+</body>
+</html>

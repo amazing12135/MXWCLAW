@@ -16,12 +16,22 @@ from typing import Any
 
 @functools.lru_cache(maxsize=8)
 def _get_encoding(model: str):
-    """Return a tiktoken Encoding for *model*, falling back to cl100k_base."""
+    """Return a tiktoken Encoding for *model*, falling back to cl100k_base.
+
+    Returns ``None`` when tiktoken data is not locally cached and the
+    download fails (e.g. network blocked), so callers fall back to a
+    character-count heuristic.
+    """
     import tiktoken
     try:
         return tiktoken.encoding_for_model(model)
     except KeyError:
-        return tiktoken.get_encoding("cl100k_base")
+        try:
+            return tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            return None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +44,8 @@ def _estimate_tokens(text: str, model: str) -> int:
         return 0
     try:
         enc = _get_encoding(model)
+        if enc is None:
+            raise RuntimeError("tiktoken encoding unavailable")
         return len(enc.encode(text))
     except Exception:
         cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff" or "\u3040" <= c <= "\u30ff")

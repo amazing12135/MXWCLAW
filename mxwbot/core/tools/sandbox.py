@@ -52,7 +52,15 @@ def _bwrap(command: str, workspace: str, cwd: str) -> str:
     return shlex.join(args)
 
 
-_BACKENDS: dict[str, object] = {"bwrap": _bwrap}
+def _none(command: str, workspace: str, cwd: str) -> str:
+    """无沙箱封装 — 直接返回原始命令。
+
+    仅用于 Windows 或信任环境。黑名单和注入检测仍在 ShellTool 中生效。
+    """
+    return command
+
+
+_BACKENDS: dict[str, object] = {"bwrap": _bwrap, "none": _none}
 
 
 def wrap_command(backend: str, command: str, workspace: str, cwd: str) -> str:

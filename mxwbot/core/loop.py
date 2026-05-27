@@ -564,6 +564,7 @@ class LoopPool:
         checkpoint_interval: int = 2,
         max_iterations: int = 3,
         max_context_tokens: int = 80_000,
+        skip_confirmation: bool = False,
     ) -> None:
         self._bus = bus
         self._sessions = sessions
@@ -579,6 +580,7 @@ class LoopPool:
         self._max_iterations = max_iterations
         self._max_context_tokens = max_context_tokens
         self._running = False
+        self._skip_confirmation = skip_confirmation
 
     # ------------------------------------------------------------------
     # Public API
@@ -695,6 +697,7 @@ class LoopPool:
                     session_key=session_key,
                 )
                 is_direct = msg.metadata.get("_direct_id") is not None
+                skip = is_direct or self._skip_confirmation
                 loop = Loop(
                     ctx,
                     sessions=self._sessions,
@@ -706,7 +709,7 @@ class LoopPool:
                     checkpoint=self._checkpoint,
                     skills=self._skills,
                     bus=self._bus,
-                    skip_confirmation=is_direct,
+                    skip_confirmation=skip,
                     checkpoint_interval=self._checkpoint_interval,
                     max_iterations=self._max_iterations,
                     max_context_tokens=self._max_context_tokens,

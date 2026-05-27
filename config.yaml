@@ -1,27 +1,31 @@
 # MXWbot configuration
-workspace: F:\mxwclaw\.mxwbot
+workspace: ./workspace
 log_level: INFO
 
 providers:
-  - name: deepseek
-    api_key: "sk-0b97ddcd76a6414982aac116c6e37043"
-    model: deepseek-v4-flash
+  - name: provider
+    api_key: your_api_key
+    model: you_model_name
     max_tokens: 4096
     temperature: 0.7
 
 channels:
   - type: wechat
-    enabled: true
+    enabled: false
   - type: email
     enabled: false
 
 tools:
   filesystem_enabled: true
+  unrestricted_filesystem: true
   shell:
     enabled: true
     timeout_seconds: 30
+    sandbox_backend: "none"
 
 agent:
   max_iterations: 10
   timeout_seconds: 120
   checkpoint_interval: 2
+  max_concurrent_sessions: 20
+  skip_confirmation: true
