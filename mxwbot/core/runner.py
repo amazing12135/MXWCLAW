@@ -6,6 +6,7 @@ LLM 推理 → 工具调用 → 结果注入 → 再推理，最多 max_iteratio
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -55,6 +56,23 @@ class AgentRunResult:
 
 class AgentRunner:
     """纯 ReAct 循环引擎。"""
+
+    @staticmethod
+    def _build_tools_schema(
+        registry: Any,
+        loaded_tools: set[str],
+    ) -> list[dict[str, Any]] | None:
+        """Build tools_schema: core definitions + any loaded extension tools."""
+        if registry is None:
+            return None
+        schemas = registry.get_core_definitions()
+        for name in sorted(loaded_tools):
+            try:
+                tool = registry.get(name)
+                schemas.append(tool.to_openai_schema())
+            except KeyError:
+                pass
+        return schemas
 
     async def run(
         self,
@@ -219,13 +237,20 @@ class AgentRunner:
         Tool-call accumulation happens silently; once the full response
         is assembled, tool execution follows the same path as ``run()``.
         """
-        tools_schema = spec.tools.to_openai_schema() if spec.tools else None
+        tools_schema = (
+            spec.tools.get_core_definitions() if spec.tools else None
+        )
         total_usage = TokenUsage()
         total_tool_calls = 0
         iteration = 0
+        consecutive_failures = 0
+        loaded_tools: set[str] = set()  # tools loaded via get_tool_schema
 
         while iteration < spec.max_iterations:
             iteration += 1
+
+            # Rebuild tools_schema: core + any loaded extension tools
+            tools_schema = self._build_tools_schema(spec.tools, loaded_tools)
 
             # Hook: before LLM call
             if spec.hook:
@@ -338,12 +363,49 @@ class AgentRunner:
                     )
                     await spec.hook.after_tool_call(tool_name, result)
 
+            # Detect get_tool_schema calls → load extension tool schemas
+            for tc in tool_calls:
+                if tc.name == "get_tool_schema":
+                    try:
+                        args = json.loads(tc.arguments) if isinstance(tc.arguments, str) else tc.arguments
+                        tool_name = args.get("name", "")
+                        if tool_name and tool_name not in loaded_tools:
+                            loaded_tools.add(tool_name)
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        pass
+
+            # Track consecutive failures — inject hint so LLM stops retrying
+            failure_count = sum(1 for _, r in results if not r.success)
+            if failure_count == len(results):
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+
+            if consecutive_failures >= 3:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "连续多次工具调用均失败。请停止尝试更多工具,"
+                        "直接告知用户当前无法获取所需信息,并建议替代方案。"
+                    ),
+                })
+                consecutive_failures = 0  # 重置, 避免重复注入
+
             # 周期 Checkpoint
             if spec.on_checkpoint and iteration % spec.checkpoint_interval == 0:
                 await spec.on_checkpoint(messages, iteration)
 
+        # max_iterations exhausted — make one final tool-less call so the
+        # LLM can produce a text response based on accumulated context
+        if spec.hook:
+            await spec.hook.before_llm_call(messages, None)
+        final_response = await self._stream_one(
+            spec.provider, messages, None, spec.hook,
+        )
+        total_usage.input_tokens += final_response.usage.input_tokens
+        total_usage.output_tokens += final_response.usage.output_tokens
         return AgentRunResult(
-            content="",
+            content=final_response.content or "抱歉,我尝试了多次但未能完成您的请求,请稍后再试。",
             tool_calls_made=total_tool_calls,
             iterations=iteration,
             usage=total_usage,
@@ -402,6 +464,9 @@ class AgentRunner:
 
             if chunk.finish_reason:
                 finish_reason = chunk.finish_reason
+
+            if chunk.usage:
+                usage = chunk.usage
 
         # Build tool_calls from accumulated deltas
         tool_calls: list[ToolCallRequest] = []

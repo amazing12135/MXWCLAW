@@ -10,7 +10,7 @@ import asyncio
 import json
 from typing import Any
 
-from mxwbot.core.tools.base import Tool, ToolResult
+from mxwbot.core.tools.base import CORE_TOOL_NAMES, Tool, ToolResult
 
 
 class ToolRegistry:
@@ -104,6 +104,60 @@ class ToolRegistry:
         """导出为 OpenAI function calling 格式（快捷方法）。"""
         return self.get_definitions()
 
+    # -- 懒加载支持 ---------------------------------------------------------
+
+    def get_core_definitions(self) -> list[dict[str, Any]]:
+        """返回仅核心工具 + get_tool_schema 的 OpenAI schema。
+
+        用于首轮 LLM 调用，减少 token 消耗。
+        扩展工具通过 get_tool_schema 按需加载。
+        """
+        from mxwbot.core.tools.base import get_tool_schema_instance
+
+        defs: list[dict[str, Any]] = []
+        for name in sorted(self._tools):
+            if name in CORE_TOOL_NAMES:
+                defs.append(self._tools[name].to_openai_schema())
+        # Always include the meta-tool itself
+        gt = get_tool_schema_instance()
+        defs.append(gt.to_openai_schema())
+        return defs
+
+    def get_catalog_text(self) -> str:
+        """生成文本目录，注入 system prompt 供 LLM 了解可用工具。
+
+        Returns:
+            格式化的工具目录文本，包含核心工具和扩展工具。
+        """
+        core_names = sorted(n for n in self._tools if n in CORE_TOOL_NAMES)
+        ext_names = sorted(
+            n for n in self._tools
+            if n not in CORE_TOOL_NAMES and n != "get_tool_schema"
+        )
+
+        lines: list[str] = []
+        lines.append("## 可用工具")
+
+        # Core section
+        lines.append("")
+        lines.append("■ 核心工具 (已加载, 可直接调用):")
+        for name in core_names:
+            tool = self._tools[name]
+            params_str = _describe_params(tool)
+            lines.append(f"  {name}({params_str}) — {tool.description}")
+
+        # Extension section
+        if ext_names:
+            lines.append("")
+            lines.append("■ 扩展工具 (首次使用需先调用 get_tool_schema(\"工具名\") 加载):")
+            for name in ext_names:
+                tool = self._tools[name]
+                lines.append(f"  {name} — {tool.description}")
+
+        lines.append("")
+        lines.append("※ 首次使用扩展工具时，请先调用 get_tool_schema(\"工具名\") 获取完整参数定义。")
+        return "\n".join(lines)
+
     # -- 调用预处理 ---------------------------------------------------------
 
     def prepare_call(
@@ -184,3 +238,20 @@ class ToolRegistry:
 
 async def _error(msg: str) -> ToolResult:
     return ToolResult(success=False, error=msg)
+
+
+def _describe_params(tool: Tool) -> str:
+    """从 Tool.parameters 生成简短参数签名，如 'path, content'。"""
+    props = tool.parameters.get("properties", {})
+    required = tool.parameters.get("required", [])
+    parts: list[str] = []
+    for name, schema in props.items():
+        if name in required:
+            parts.append(name)
+        else:
+            default = schema.get("default", "")
+            if default:
+                parts.append(f'{name}={default}')
+            else:
+                parts.append(f'{name}=...')
+    return ", ".join(parts)

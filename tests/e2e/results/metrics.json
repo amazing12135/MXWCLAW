@@ -1,0 +1,37 @@
+{
+  "date": "2026-05-24",
+  "scenario_pass_rate": 0.917,
+  "total_scenarios": 24,
+  "passed": 22,
+  "total_input_tokens": 148603,
+  "total_output_tokens": 3889,
+  "avg_latency_ms": 6817.0,
+  "setup_ms": 3141.0,
+  "total_ms": 223750.0,
+  "group_breakdown": {
+    "A": {
+      "total": 5,
+      "passed": 5
+    },
+    "B": {
+      "total": 8,
+      "passed": 7
+    },
+    "C": {
+      "total": 3,
+      "passed": 2
+    },
+    "D": {
+      "total": 4,
+      "passed": 4
+    },
+    "E": {
+      "total": 2,
+      "passed": 2
+    },
+    "F": {
+      "total": 2,
+      "passed": 2
+    }
+  }
+}

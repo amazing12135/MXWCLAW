@@ -6,7 +6,10 @@
       "Bash(.venv/Scripts/python.exe -m pytest tests/ -q)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_channel/test_qq.py -v)",
-      "Bash(.venv/Scripts/python.exe -m pytest tests/test_channel/test_weixin.py -v)"
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_channel/test_weixin.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_system/test_manager.py -v --tb=line)",
+      "Bash(.venv/Scripts/python.exe test_web.py)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_core/test_tools.py -v)"
     ]
   }
 }

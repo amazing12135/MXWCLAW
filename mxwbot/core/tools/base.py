@@ -263,3 +263,62 @@ class Tool(ABC):
                 "parameters": copy.deepcopy(self.parameters),
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# Meta-tool: get_tool_schema — lazy-load extension tool definitions
+# ---------------------------------------------------------------------------
+
+class GetToolSchemaTool(Tool):
+    """元工具：让 LLM 按需获取扩展工具的完整 JSON Schema。
+
+    首次调用扩展工具前，LLM 调用 ``get_tool_schema("tool_name")``
+    获取其完整参数定义。获取后该工具在本次 session 内可直接使用。
+    """
+
+    name = "get_tool_schema"
+    description = "获取指定工具的完整参数定义。首次使用扩展工具前调用。"
+    is_readonly = True
+    parameters = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "要获取参数定义的工具名称",
+            },
+        },
+        "required": ["name"],
+    }
+
+    def __init__(self, registry: Any = None) -> None:
+        self._registry = registry
+
+    async def execute(self, name: str, **kwargs: Any) -> ToolResult:
+        if self._registry is None:
+            return ToolResult(success=False, error="ToolRegistry 未注入")
+        try:
+            tool = self._registry.get(name)
+        except KeyError:
+            return ToolResult(success=False, error=f"工具不存在: {name}")
+        schema = tool.to_openai_schema()
+        return ToolResult(content=json.dumps(schema, ensure_ascii=False, indent=2))
+
+
+# Sentinel for unset registry
+_GET_TOOL_SCHEMA: GetToolSchemaTool | None = None
+
+
+def get_tool_schema_instance(registry: Any = None) -> GetToolSchemaTool:
+    """Return the singleton GetToolSchemaTool, injecting registry if provided."""
+    global _GET_TOOL_SCHEMA
+    if _GET_TOOL_SCHEMA is None:
+        _GET_TOOL_SCHEMA = GetToolSchemaTool(registry)
+    elif registry is not None and _GET_TOOL_SCHEMA._registry is None:
+        _GET_TOOL_SCHEMA._registry = registry
+    return _GET_TOOL_SCHEMA
+
+
+# Names of tools always sent with full schema (core set).
+CORE_TOOL_NAMES = frozenset({
+    "read_file", "write_file", "edit_file", "list_dir",
+})

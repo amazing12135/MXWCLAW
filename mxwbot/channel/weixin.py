@@ -136,7 +136,7 @@ class WeChatChannel(BaseChannel):
         if self._cfg.state_dir:
             d = Path(self._cfg.state_dir).expanduser()
         else:
-            d = Path("weixin_state")
+            d = Path.home()/".mxwbot" / "weixin"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -426,7 +426,7 @@ class WeChatChannel(BaseChannel):
             except httpx.TimeoutException:
                 # 长轮询超时是正常的，立即重试
                 continue
-            except Exception:
+            except Exception as e:
                 if not self._running:
                     break
                 consecutive_failures += 1
@@ -438,8 +438,7 @@ class WeChatChannel(BaseChannel):
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     consecutive_failures = 0
                 logger.warning(
-                    "WeChat poll error, retrying in %ds (failures=%d)",
-                    delay, consecutive_failures,
+                    f"WeChat poll error: {e},retrying in {delay}s (consecutive_failures={consecutive_failures})" 
                 )
                 await asyncio.sleep(delay)
 

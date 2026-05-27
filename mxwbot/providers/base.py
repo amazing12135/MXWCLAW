@@ -118,6 +118,7 @@ class LLMStreamChunk:
     finish_reason: str | None = None
     error: str | None = None  # Non-null when the stream terminated with an error
     reasoning_content: str | None = None  # DeepSeek-R1 thinking mode
+    usage: TokenUsage | None = None  # Terminal chunk with token usage (streaming)
 
 
 class LLMCallPurpose(Enum):

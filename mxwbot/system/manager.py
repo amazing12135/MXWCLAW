@@ -122,6 +122,9 @@ class SystemManager:
             self.tools.register(cls(ws_path))
         self.tools.register(WebSearchTool())
         self.tools.register(WebFetchTool())
+        # Meta-tool for lazy-loading extension tool definitions
+        from mxwbot.core.tools.base import get_tool_schema_instance
+        self.tools.register(get_tool_schema_instance(self.tools))
 
         # Runner
         self.runner = AgentRunner()

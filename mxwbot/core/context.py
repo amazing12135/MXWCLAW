@@ -64,6 +64,7 @@ class ContextBuilder:
         memory_manager: Any = None,
         skill_loader: Any = None,
         extra_messages: list[dict[str, Any]] | None = None,
+        tools: Any = None,
     ) -> list[dict[str, Any]]:
         """组装消息列表。
 
@@ -74,6 +75,7 @@ class ContextBuilder:
             memory_manager: MemoryManager 实例 (AGENT 时需要)。
             skill_loader: SkillLoader 实例 (AGENT 时需要)。
             extra_messages: 附加消息（如 pending tool-call/results）。
+            tools: ToolRegistry 实例 (AGENT 时注入工具目录到 system prompt)。
 
         Returns:
             LLM-ready 消息列表。
@@ -81,6 +83,7 @@ class ContextBuilder:
         if purpose == LLMCallPurpose.AGENT:
             return await self._build_full(
                 session, user_msg, memory_manager, skill_loader, extra_messages,
+                tools,
             )
         else:
             return self._build_minimal(user_msg, extra_messages)
@@ -92,6 +95,7 @@ class ContextBuilder:
         memory_manager: Any,
         skill_loader: Any,
         extra_messages: list[dict[str, Any]] | None,
+        tools: Any = None,
     ) -> list[dict[str, Any]]:
         system_parts = [self._identity_prompt()]
 
@@ -100,7 +104,7 @@ class ContextBuilder:
             if xml:
                 system_parts.append(xml)
             for skill in skill_loader.get_always_loaded():
-                system_parts.append(f"## Skill: {skill.name}\n{skill.content}")
+                system_parts.append(f"## Skill: {skill.name}\n{skill.conntent}")
 
         if session and session.session_summary:
             system_parts.append(f"## 历史摘要\n{session.session_summary}")
@@ -112,6 +116,12 @@ class ContextBuilder:
             mem_context = await memory_manager.get_context(query=user_msg)
             if mem_context:
                 system_parts.append(mem_context)
+
+        # Auto-generated tool catalog (lazy-loading)
+        if tools and hasattr(tools, 'get_catalog_text'):
+            catalog = tools.get_catalog_text()
+            if catalog:
+                system_parts.append(catalog)
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": "\n\n".join(system_parts)},

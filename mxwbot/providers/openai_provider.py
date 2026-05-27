@@ -245,6 +245,13 @@ class OpenAIProvider(LLMProvider):
 
         # Finish reason (terminal chunk)
         if choice.finish_reason:
-            chunks.append(LLMStreamChunk(finish_reason=choice.finish_reason))
+            # Usage is typically delivered on the terminal chunk together with finish_reason
+            usage = None
+            if hasattr(event, "usage") and event.usage:
+                usage = TokenUsage(
+                    input_tokens=getattr(event.usage, "prompt_tokens", 0) or 0,
+                    output_tokens=getattr(event.usage, "completion_tokens", 0) or 0,
+                )
+            chunks.append(LLMStreamChunk(finish_reason=choice.finish_reason, usage=usage))
 
         return chunks

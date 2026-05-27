@@ -300,6 +300,7 @@ class Loop:
             user_msg=ctx.msg.content,
             memory_manager=self._memory,
             skill_loader=self._skills,
+            tools=self._tools,
         )
         return "ok"
 
@@ -427,7 +428,9 @@ class Loop:
 
         channel = self.ctx.msg.channel
         chat_id = self.ctx.msg.chat_id
-        content = result.content or ""
+        content = (result.content or "").strip()
+        if not content:
+            content = "抱歉,处理您的请求时遇到了问题,请稍后再试。"
 
         # Close the stream — channel.send_stream() uses this as terminal
         await self._bus.publish_stream_delta(StreamDelta(
@@ -691,6 +694,7 @@ class LoopPool:
                     session=session,
                     session_key=session_key,
                 )
+                is_direct = msg.metadata.get("_direct_id") is not None
                 loop = Loop(
                     ctx,
                     sessions=self._sessions,
@@ -702,6 +706,7 @@ class LoopPool:
                     checkpoint=self._checkpoint,
                     skills=self._skills,
                     bus=self._bus,
+                    skip_confirmation=is_direct,
                     checkpoint_interval=self._checkpoint_interval,
                     max_iterations=self._max_iterations,
                     max_context_tokens=self._max_context_tokens,
